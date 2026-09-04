@@ -27,7 +27,13 @@ from pathlib import Path
 from typing import Final, TypeVar
 
 import anthropic
+from dotenv import load_dotenv
 from pydantic import BaseModel, ConfigDict
+
+# Reads .env if present, without overriding a key already exported in the shell. Called
+# at import so every entry point -- harness, Streamlit, a REPL -- picks the key up the
+# same way, and none of them has to remember to.
+load_dotenv(override=False)
 
 MODEL_ID: Final[str] = "claude-opus-5"
 """Pinned. Changing this invalidates every cached response, by design."""

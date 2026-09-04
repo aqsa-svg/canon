@@ -69,7 +69,10 @@
   expected_behavior: answer
   expected_metric: order_count
   expected_grain: month
-  notes: Order-grain time series, all statuses.
+  notes: >-
+    Order-grain time series across a full year, counting every status including
+    canceled. The near-miss is delivered_order_count, which would drop roughly a
+    tenth of the volume in the earlier months.
   gold_sql: |
     SELECT date_trunc('month', o.order_purchase_timestamp) AS period, count(DISTINCT o.order_id)
     FROM orders o

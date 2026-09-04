@@ -16,3 +16,7 @@ data/*.duckdb.wal
 
 # benchmark run outputs (results are committed deliberately, not incidentally)
 benchmark/runs/
+
+# benchmark run outputs are reproducible from the cache; the report is committed by hand
+benchmark/runs/
+data/llm_cache/
