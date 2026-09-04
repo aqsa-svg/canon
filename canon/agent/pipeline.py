@@ -10,7 +10,7 @@ The LLM appears exactly once, at the top, and produces no SQL.
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime
 from functools import cached_property
 from pathlib import Path
 
@@ -231,6 +231,14 @@ def _chart_for(compiled: CompiledQuery, row_count: int) -> ChartSpec | None:
 
 
 def _as_date(value: object) -> date:
+    """Narrow a warehouse timestamp to a calendar date.
+
+    datetime subclasses date, so the isinstance check has to test datetime FIRST -- and
+    the truncation has to happen, because DataWindow wants a date with no time component
+    and rejects a datetime carrying one.
+    """
+    if isinstance(value, datetime):
+        return value.date()
     if isinstance(value, date):
         return value
     raise TypeError(f"expected a date from the warehouse, got {type(value).__name__}")
