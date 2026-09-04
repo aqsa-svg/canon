@@ -66,9 +66,9 @@ series as a scalar, so:
 
 ```python
 class AnswerValue(BaseModel):
-    columns: tuple[ResultColumn, ...]   # name + dtype per column
+    columns: tuple[ResultColumn, ...]  # name + dtype per column
     rows: tuple[tuple[Scalar, ...], ...]
-    scalar: Scalar | None               # set iff exactly 1 row x 1 column
+    scalar: Scalar | None  # set iff exactly 1 row x 1 column
 ```
 
 `scalar` is a convenience for the 1x1 case so the common path is not a nested index. The
