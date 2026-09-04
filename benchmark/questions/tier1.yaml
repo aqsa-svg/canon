@@ -1,0 +1,295 @@
+# Tier 1 -- single metric, at most one filter, an explicit time range.
+#
+# Baseline competence. Every question here names its metric closely enough that the
+# canonical layer resolves it without judgement, so a failure in this tier is a failure
+# of the machinery rather than of interpretation.
+#
+# Gold SQL is hand-written from the metric cards, deliberately in a different style from
+# the compiler's output: its own aliases, plain JOIN where the cardinality makes it
+# equivalent to the compiler's LEFT JOIN. Two independently written queries agreeing is
+# the evidence; a transcription of the compiler's own SQL would be worthless.
+
+- id: t1-01
+  question: What was net revenue in 2018?
+  tier: "1"
+  expected_behavior: answer
+  expected_metric: net_revenue
+  notes: >-
+    The simplest possible case, and the anchor for the whole set: metric named outright,
+    calendar year given. The card's default status filter must be applied without being
+    asked for.
+  gold_sql: |
+    SELECT SUM(i.price)
+    FROM order_items i JOIN orders o ON i.order_id = o.order_id
+    WHERE o.order_status NOT IN ('canceled', 'unavailable')
+      AND o.order_purchase_timestamp >= DATE '2018-01-01'
+      AND o.order_purchase_timestamp <  DATE '2019-01-01'
+
+- id: t1-02
+  question: What was gross revenue in 2017?
+  tier: "1"
+  expected_behavior: answer
+  expected_metric: gross_revenue
+  notes: >-
+    The other half of the trap pair, named outright so it is answerable. Gross carries no
+    default filters and includes freight, so picking net here is wrong by both axes.
+  gold_sql: |
+    SELECT SUM(i.price + i.freight_value)
+    FROM order_items i JOIN orders o ON i.order_id = o.order_id
+    WHERE o.order_purchase_timestamp >= DATE '2017-01-01'
+      AND o.order_purchase_timestamp <  DATE '2018-01-01'
+
+- id: t1-03
+  question: How many orders were placed in 2017?
+  tier: "1"
+  expected_behavior: answer
+  expected_metric: order_count
+  notes: >-
+    "Placed" is the cue for order_count, which counts every status including canceled.
+  gold_sql: |
+    SELECT count(DISTINCT o.order_id) FROM orders o
+    WHERE o.order_purchase_timestamp >= DATE '2017-01-01'
+      AND o.order_purchase_timestamp <  DATE '2018-01-01'
+
+- id: t1-04
+  question: How many orders were delivered in 2018?
+  tier: "1"
+  expected_behavior: answer
+  expected_metric: delivered_order_count
+  notes: >-
+    Distinguishing delivered_order_count from order_count is the whole test. The card
+    buckets by purchase date, not delivery date, which is a caveat the answer should carry.
+  gold_sql: |
+    SELECT count(DISTINCT o.order_id) FROM orders o
+    WHERE o.order_status = 'delivered'
+      AND o.order_purchase_timestamp >= DATE '2018-01-01'
+      AND o.order_purchase_timestamp <  DATE '2019-01-01'
+
+- id: t1-05
+  question: How many orders were canceled in 2018?
+  tier: "1"
+  expected_behavior: answer
+  expected_metric: canceled_order_count
+  notes: >-
+    Only status 'canceled'. The 'unavailable' orders also never reached a customer but are
+    a stock-out, counted separately -- a system that lumps them together is wrong.
+  gold_sql: |
+    SELECT count(DISTINCT o.order_id) FROM orders o
+    WHERE o.order_status = 'canceled'
+      AND o.order_purchase_timestamp >= DATE '2018-01-01'
+      AND o.order_purchase_timestamp <  DATE '2019-01-01'
+
+- id: t1-06
+  question: How much freight revenue did we bill in 2018?
+  tier: "1"
+  expected_behavior: answer
+  expected_metric: freight_revenue
+  notes: >-
+    Shipping charged to customers, which the card is careful to distinguish from shipping
+    cost incurred -- the warehouse holds no carrier cost, so margin is not computable.
+  gold_sql: |
+    SELECT SUM(i.freight_value)
+    FROM order_items i JOIN orders o ON i.order_id = o.order_id
+    WHERE o.order_status NOT IN ('canceled', 'unavailable')
+      AND o.order_purchase_timestamp >= DATE '2018-01-01'
+      AND o.order_purchase_timestamp <  DATE '2019-01-01'
+
+- id: t1-07
+  question: How many items were sold in 2018?
+  tier: "1"
+  expected_behavior: answer
+  expected_metric: items_sold
+  notes: Unit count at line-item grain, not an order count.
+  gold_sql: |
+    SELECT count(*)
+    FROM order_items i JOIN orders o ON i.order_id = o.order_id
+    WHERE o.order_status NOT IN ('canceled', 'unavailable')
+      AND o.order_purchase_timestamp >= DATE '2018-01-01'
+      AND o.order_purchase_timestamp <  DATE '2019-01-01'
+
+- id: t1-08
+  question: What was the average item price in 2018?
+  tier: "1"
+  expected_behavior: answer
+  expected_metric: avg_item_price
+  notes: >-
+    Averaged over line items. The near-miss is avg_order_value, which averages over
+    orders and is a materially different number.
+  gold_sql: |
+    SELECT AVG(i.price)
+    FROM order_items i JOIN orders o ON i.order_id = o.order_id
+    WHERE o.order_status NOT IN ('canceled', 'unavailable')
+      AND o.order_purchase_timestamp >= DATE '2018-01-01'
+      AND o.order_purchase_timestamp <  DATE '2019-01-01'
+
+- id: t1-09
+  question: On average, how many days did delivery take?
+  tier: "1"
+  expected_behavior: answer
+  expected_metric: avg_delivery_days
+  notes: >-
+    No time range, so the whole warehouse. Two default filters must fire, one of them an
+    is_not_null guard on a column that is not a dimension.
+  gold_sql: |
+    SELECT AVG(date_diff('day', o.order_purchase_timestamp, o.order_delivered_customer_date))
+    FROM orders o
+    WHERE o.order_status = 'delivered'
+      AND o.order_delivered_customer_date IS NOT NULL
+
+- id: t1-10
+  question: What is the average review score customers left?
+  tier: "1"
+  expected_behavior: answer
+  expected_metric: avg_review_score
+  notes: >-
+    Review grain, and the card's time column is the review date rather than the order
+    date. No range asked for, so the distinction does not bite here.
+  gold_sql: |
+    SELECT AVG(r.review_score) FROM order_reviews r
+
+- id: t1-11
+  question: How many unique customers ordered in 2018?
+  tier: "1"
+  expected_behavior: answer
+  expected_metric: unique_customers
+  notes: >-
+    "Unique" disambiguates what would otherwise be the declared-ambiguous word
+    "customers". Must count customer_unique_id, not the per-order customer_id.
+  gold_sql: |
+    SELECT count(DISTINCT cu.customer_unique_id)
+    FROM orders o JOIN customers cu ON o.customer_id = cu.customer_id
+    WHERE o.order_purchase_timestamp >= DATE '2018-01-01'
+      AND o.order_purchase_timestamp <  DATE '2019-01-01'
+
+- id: t1-12
+  question: What was the total value of payments recorded in 2018?
+  tier: "1"
+  expected_behavior: answer
+  expected_metric: total_payment_value
+  notes: >-
+    Payments do not reconcile to gross revenue, and the card says so. Asking for payments
+    specifically is answerable; the caveat about the gap should travel with it.
+  gold_sql: |
+    SELECT SUM(p.payment_value)
+    FROM order_payments p JOIN orders o ON p.order_id = o.order_id
+    WHERE o.order_purchase_timestamp >= DATE '2018-01-01'
+      AND o.order_purchase_timestamp <  DATE '2019-01-01'
+
+- id: t1-13
+  question: How many reviews were submitted in 2018?
+  tier: "1"
+  expected_behavior: answer
+  expected_metric: review_count
+  notes: >-
+    Bucketed by review creation date, which is this metric's declared time column. Also
+    counts review rows rather than reviewed orders.
+  gold_sql: |
+    SELECT count(*) FROM order_reviews r
+    WHERE r.review_creation_date >= DATE '2018-01-01'
+      AND r.review_creation_date <  DATE '2019-01-01'
+
+- id: t1-14
+  question: What was the average number of installments in 2018?
+  tier: "1"
+  expected_behavior: answer
+  expected_metric: avg_installments
+  notes: >-
+    Instrument grain. Non-installment instruments record 1 and are included, which pulls
+    the average toward 1 -- a caveat, not an error.
+  gold_sql: |
+    SELECT AVG(p.payment_installments)
+    FROM order_payments p JOIN orders o ON p.order_id = o.order_id
+    WHERE o.order_purchase_timestamp >= DATE '2018-01-01'
+      AND o.order_purchase_timestamp <  DATE '2019-01-01'
+
+- id: t1-15
+  question: How many sellers made a sale in 2018?
+  tier: "1"
+  expected_behavior: answer
+  expected_metric: active_sellers
+  notes: >-
+    "Made a sale" is activity, not registration. The card is explicit that active means
+    sold at least one item in the window.
+  gold_sql: |
+    SELECT count(DISTINCT i.seller_id)
+    FROM order_items i JOIN orders o ON i.order_id = o.order_id
+    WHERE o.order_status NOT IN ('canceled', 'unavailable')
+      AND o.order_purchase_timestamp >= DATE '2018-01-01'
+      AND o.order_purchase_timestamp <  DATE '2019-01-01'
+
+- id: t1-16
+  question: What was net revenue in March 2018?
+  tier: "1"
+  expected_behavior: answer
+  expected_metric: net_revenue
+  notes: >-
+    A single month, which is the half-open range test: start 2018-03-01, end 2018-04-01.
+    An inclusive end date would pull in all of 1 April.
+  gold_sql: |
+    SELECT SUM(i.price)
+    FROM order_items i JOIN orders o ON i.order_id = o.order_id
+    WHERE o.order_status NOT IN ('canceled', 'unavailable')
+      AND o.order_purchase_timestamp >= DATE '2018-03-01'
+      AND o.order_purchase_timestamp <  DATE '2018-04-01'
+
+- id: t1-17
+  question: What was the cancellation rate in 2018?
+  tier: "1"
+  expected_behavior: answer
+  expected_metric: cancellation_rate
+  notes: >-
+    A ratio, returned as a fraction rather than a percentage. Denominator is all orders
+    at any status.
+  gold_sql: |
+    SELECT CAST(count(DISTINCT CASE WHEN o.order_status = 'canceled' THEN o.order_id END) AS DOUBLE)
+         / NULLIF(count(DISTINCT o.order_id), 0)
+    FROM orders o
+    WHERE o.order_purchase_timestamp >= DATE '2018-01-01'
+      AND o.order_purchase_timestamp <  DATE '2019-01-01'
+
+- id: t1-18
+  question: What share of deliveries arrived late in 2018?
+  tier: "1"
+  expected_behavior: answer
+  expected_metric: late_delivery_rate
+  notes: >-
+    Late against the customer-facing estimate, which is padded, not against a contractual
+    SLA. That distinction is a caveat on the card.
+  gold_sql: |
+    SELECT CAST(SUM(CASE WHEN o.order_delivered_customer_date > o.order_estimated_delivery_date
+                         THEN 1 ELSE 0 END) AS DOUBLE) / NULLIF(count(*), 0)
+    FROM orders o
+    WHERE o.order_status = 'delivered'
+      AND o.order_delivered_customer_date IS NOT NULL
+      AND o.order_purchase_timestamp >= DATE '2018-01-01'
+      AND o.order_purchase_timestamp <  DATE '2019-01-01'
+
+- id: t1-19
+  question: What was the average order value in 2018?
+  tier: "1"
+  expected_behavior: answer
+  expected_metric: avg_order_value
+  notes: >-
+    Item grain divided by distinct orders, which is the fan-out-safe way to average per
+    order. Freight excluded, matching net revenue.
+  gold_sql: |
+    SELECT SUM(i.price) / count(DISTINCT i.order_id)
+    FROM order_items i JOIN orders o ON i.order_id = o.order_id
+    WHERE o.order_status NOT IN ('canceled', 'unavailable')
+      AND o.order_purchase_timestamp >= DATE '2018-01-01'
+      AND o.order_purchase_timestamp <  DATE '2019-01-01'
+
+- id: t1-20
+  question: What proportion of reviews in 2018 gave one star?
+  tier: "1"
+  expected_behavior: answer
+  expected_metric: one_star_review_rate
+  notes: >-
+    Recomputed within the slice rather than read off a warehouse-wide constant. Bucketed
+    by review creation date.
+  gold_sql: |
+    SELECT CAST(SUM(CASE WHEN r.review_score = 1 THEN 1 ELSE 0 END) AS DOUBLE)
+         / NULLIF(count(*), 0)
+    FROM order_reviews r
+    WHERE r.review_creation_date >= DATE '2018-01-01'
+      AND r.review_creation_date <  DATE '2019-01-01'

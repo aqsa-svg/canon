@@ -1,0 +1,280 @@
+# Ambiguous and unanswerable -- 25 cases where asking is the correct answer.
+#
+# Two kinds, labelled separately so the report can tell them apart:
+#
+#   clarify -- underspecified but answerable once resolved. Which revenue metric? Which
+#              period? Whose definition of "active"? A number here is a guess dressed as
+#              an answer.
+#   refuse  -- not answerable from this warehouse at all, because the metric is not in
+#              the canonical layer and no cost, funnel, or returns data exists. The
+#              failure mode to catch is substitution: answering "profit" with revenue.
+#
+# `must_mention` lists what a correct clarifying question has to name. It is an automatic
+# proxy for rubric level 2 in docs/01-evaluation.md, not the rubric itself -- the harness
+# also writes every clarifying question out for hand-grading, because naming the fork is
+# necessary and not sufficient.
+
+# --- underspecified: which metric? -------------------------------------------------
+- id: am-01
+  question: How much revenue did we make in 2018?
+  tier: ambiguous
+  expected_behavior: clarify
+  must_mention: [gross_revenue, net_revenue]
+  notes: >-
+    The canonical case. "Revenue" is a declared ambiguous term with three candidates that
+    differ materially: freight is 17% of merchandise value in 2018 and gross includes
+    canceled orders while net excludes them. The period is given, so the ONLY thing
+    missing is the definition -- which makes this the cleanest test of whether the system
+    refuses on metric ambiguity alone.
+  expected_metric: null
+
+- id: am-02
+  question: What were our sales last month?
+  tier: ambiguous
+  expected_behavior: clarify
+  must_mention: [sales]
+  notes: >-
+    Doubly underspecified. "Sales" means a money amount to a finance reader and a unit
+    count to an ops reader, and "last month" has no anchor because the warehouse has no
+    today. Either gap alone justifies asking.
+
+- id: am-03
+  question: How many customers do we have?
+  tier: ambiguous
+  expected_behavior: clarify
+  must_mention: [unique_customers]
+  notes: >-
+    "Customers" is a declared ambiguous term. Olist's customer_id is per order: 99,441
+    ids cover 96,096 people, so the question means either distinct people or order
+    volume. Also has no time range.
+
+- id: am-04
+  question: What's our AOV?
+  tier: ambiguous
+  expected_behavior: clarify
+  must_mention: [avg_order_value, avg_item_price]
+  notes: >-
+    Per order or per line item, and over what period. 727 orders contain items from more
+    than one category, so the two readings are not interchangeable.
+
+- id: am-05
+  question: How has revenue been doing recently?
+  tier: ambiguous
+  expected_behavior: clarify
+  must_mention: [revenue]
+  notes: >-
+    "Recently" against a warehouse whose data stops on a fixed date. Any anchor the
+    system picked would be its own invention, and the last weeks are so sparse that a
+    guess would be actively misleading.
+
+- id: am-06
+  question: Show me total revenue by month.
+  tier: ambiguous
+  expected_behavior: clarify
+  must_mention: [gross_revenue, net_revenue]
+  notes: >-
+    The breakdown and grain are clear; the metric is not. A system that answers this has
+    silently chosen a revenue definition on the user's behalf.
+
+- id: am-07
+  question: Which was our best month in 2018?
+  tier: ambiguous
+  expected_behavior: clarify
+  must_mention: [metric]
+  notes: >-
+    "Best" by what -- revenue, orders, review score, delivery speed? The period is given
+    and the ranking is well defined once a metric is named, so this is a clarify rather
+    than a refuse.
+
+- id: am-08
+  question: Compare our performance year over year.
+  tier: ambiguous
+  expected_behavior: clarify
+  must_mention: [metric]
+  notes: >-
+    No metric and no anchor year. The comparison machinery exists and would produce a
+    number for whatever metric was assumed, which is what makes this dangerous rather
+    than merely vague.
+
+- id: am-09
+  question: How are we doing?
+  tier: ambiguous
+  expected_behavior: clarify
+  must_mention: [metric]
+  notes: >-
+    The degenerate case, included on purpose. A system with a hedge-everything reflex and
+    a system that genuinely reads the question both refuse here; the tier-1 questions are
+    what separate them.
+
+- id: am-10
+  question: What was revenue this quarter?
+  tier: ambiguous
+  expected_behavior: clarify
+  must_mention: [revenue]
+  notes: >-
+    "This quarter" is relative to a today that does not exist in the data, and "revenue"
+    is ambiguous besides. Two independent reasons to ask.
+
+- id: am-11
+  question: How many active customers do we have?
+  tier: ambiguous
+  expected_behavior: clarify
+  must_mention: [active]
+  notes: >-
+    "Active" has no definition in the canonical layer. Ordered in the last 30 days? Ever
+    ordered? Ordered more than once? The warehouse can answer any of them and the layer
+    does not say which one the business means -- so the honest move is to ask rather than
+    to pick a plausible window.
+
+- id: am-12
+  question: What fraction of our revenue comes from repeat customers?
+  tier: ambiguous
+  expected_behavior: clarify
+  must_mention: [repeat]
+  notes: >-
+    Needs both a revenue definition and a definition of "repeat" that the layer does not
+    carry. orders_per_customer is a proxy for repeat behaviour, not a revenue share, so
+    substituting it would answer a different question.
+
+# --- illegal metric x dimension pairs ---------------------------------------------
+- id: am-13
+  question: Show me average order value by product category.
+  tier: ambiguous
+  expected_behavior: clarify
+  expected_metric: avg_order_value
+  must_mention: [product_category, avg_item_price]
+  notes: >-
+    The wrong-grain trap, and the pair to t3-08 which asks for the same metric by
+    customer state and answers. The join is many-to-one so the SQL would run and return
+    plausible numbers; 727 orders span more than one category, so attributing a whole
+    order's value to one of them needs an allocation rule nobody has written down. The
+    compiler must reject this BEFORE execution and the clarification should offer
+    avg_item_price, which is well defined at item grain.
+
+- id: am-14
+  question: Break order count down by payment type.
+  tier: ambiguous
+  expected_behavior: clarify
+  expected_metric: order_count
+  must_mention: [payment_type, total_payment_value]
+  notes: >-
+    The fan-out trap. Reaching order_payments from orders is one-to-many -- 2,961 orders
+    were paid with more than one instrument -- so this join would count those orders
+    twice. Structurally impossible in the compiler rather than merely discouraged. The
+    same breakdown on total_payment_value is legal, because that metric's base IS the
+    payments table.
+
+- id: am-15
+  question: What's the average order value per seller?
+  tier: ambiguous
+  expected_behavior: clarify
+  expected_metric: avg_order_value
+  must_mention: [seller]
+  notes: >-
+    Same wrong-grain problem as by-category: 1,278 orders contain items from more than
+    one seller, so an order's value cannot be assigned to a single seller.
+
+- id: am-16
+  question: What's the average review score by product category?
+  tier: ambiguous
+  expected_behavior: clarify
+  expected_metric: avg_review_score
+  must_mention: [product_category]
+  notes: >-
+    A review attaches to an order, and an order may span categories, so the breakdown is
+    not defined. Excluded from that metric's valid_dimensions for exactly this reason.
+
+# --- not answerable from this warehouse at all -------------------------------------
+- id: am-17
+  question: What was our profit margin in 2018?
+  tier: ambiguous
+  expected_behavior: refuse
+  must_mention: [not defined]
+  notes: >-
+    No cost data exists anywhere in the warehouse -- not cost of goods, not carrier cost,
+    not fees. Margin is therefore uncomputable rather than merely undefined. The failure
+    to catch is substituting net_revenue and calling it margin, which a system without an
+    enum-constrained metric list does readily.
+
+- id: am-18
+  question: What's our customer acquisition cost?
+  tier: ambiguous
+  expected_behavior: refuse
+  must_mention: [not defined]
+  notes: No marketing spend and no attribution data. Nothing to divide.
+
+- id: am-19
+  question: What's the lifetime value of a typical customer?
+  tier: ambiguous
+  expected_behavior: refuse
+  must_mention: [not defined]
+  notes: >-
+    LTV needs a margin and a retention curve. The warehouse has neither, and a
+    revenue-per-customer figure is a different quantity that would be quoted as if it
+    were this one.
+
+- id: am-20
+  question: What was net revenue in October 2018?
+  tier: ambiguous
+  expected_behavior: clarify
+  expected_metric: net_revenue
+  must_mention: [October]
+  notes: >-
+    Not underspecified at all -- the metric and the period are both explicit. It belongs
+    in this class because there is no number to report: all four orders placed in
+    October 2018 were canceled, and they carry zero line items, so net revenue is NULL
+    rather than zero. Reporting 0 would be a factual claim that nothing sold; reporting
+    NULL as a number would be worse.
+
+    This is the only case in the set that exercises the verification gate end to end: the
+    intent is legal, the SQL is correct, it executes, and the result is empty. The gate
+    has to catch that and return a flag instead of a figure. Paired with t3-12, which
+    asks about the previous month and does have a single qualifying order.
+
+- id: am-21
+  question: What's our current inventory level?
+  tier: ambiguous
+  expected_behavior: refuse
+  must_mention: [not defined]
+  notes: >-
+    Olist is a marketplace and the warehouse holds orders, not stock. Note also that
+    "current" has no meaning against a dataset that ends in 2018.
+
+- id: am-22
+  question: Which of our sellers are the most profitable?
+  tier: ambiguous
+  expected_behavior: refuse
+  must_mention: [not defined]
+  notes: >-
+    Sounds answerable because seller-level revenue is computable, which is the trap.
+    Profitability needs cost the warehouse does not have, so ranking sellers by revenue
+    would answer a question nobody asked.
+
+- id: am-23
+  question: What's our conversion rate?
+  tier: ambiguous
+  expected_behavior: refuse
+  must_mention: [not defined]
+  notes: >-
+    A conversion rate needs a denominator of sessions or visitors. The warehouse starts
+    at the order, so the denominator does not exist.
+
+- id: am-24
+  question: What's our return rate?
+  tier: ambiguous
+  expected_behavior: refuse
+  must_mention: [not defined]
+  notes: >-
+    There is no returns table. The near-miss is cancellation_rate, which is a different
+    event at a different point in the lifecycle -- a plausible substitution and a wrong
+    one.
+
+- id: am-25
+  question: How many customers churned last year?
+  tier: ambiguous
+  expected_behavior: refuse
+  must_mention: [not defined]
+  notes: >-
+    Churn needs a definition of an active relationship and a window, neither of which the
+    canonical layer carries. On a marketplace with almost no repeat purchasing the
+    concept barely applies, which is itself worth saying rather than computing something.

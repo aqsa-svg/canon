@@ -1,0 +1,271 @@
+# Tier 3 -- answerable, but only if the canonical layer is actually consulted.
+#
+# Every question here is resolvable. What makes them hard is that the naive reading is
+# wrong in a way that still returns a number: a synonym that points at the less obvious
+# metric, a period that straddles the freight restatement, a breakdown that is legal at
+# one grain and not at another, a caveat that changes what the number means.
+#
+# `requires_caveat` is the assertion that matters in this tier. A correct number with the
+# caveat swallowed is a worse outcome than a refusal, because the reader cannot tell.
+
+- id: t3-01
+  question: What was gross revenue in 2018?
+  tier: "3"
+  expected_behavior: answer
+  expected_metric: gross_revenue
+  requires_caveat: ["canceled", "freight"]
+  notes: >-
+    Answerable because the metric is named. Trap-adjacent because gross includes canceled
+    and unavailable orders and includes freight, so the number is larger than most people
+    expect. Both caveats must surface or the figure is misleading.
+  gold_sql: |
+    SELECT SUM(i.price + i.freight_value)
+    FROM order_items i JOIN orders o ON i.order_id = o.order_id
+    WHERE o.order_purchase_timestamp >= DATE '2018-01-01'
+      AND o.order_purchase_timestamp <  DATE '2019-01-01'
+
+- id: t3-02
+  question: Show me reported revenue by quarter across 2017 and 2018.
+  tier: "3"
+  expected_behavior: answer
+  expected_metric: reported_revenue
+  expected_grain: quarter
+  requires_caveat: ["restatement"]
+  notes: >-
+    The definition-change trap. The freight treatment changes on 2018-01-01 and prior
+    periods were never restated, so this series mixes two definitions. The number is
+    correct; quoting growth through the boundary is not, and the caveat has to say so.
+  gold_sql: |
+    SELECT date_trunc('quarter', o.order_purchase_timestamp) AS period,
+           SUM(CASE WHEN o.order_purchase_timestamp < TIMESTAMP '2018-01-01'
+                    THEN i.price + i.freight_value ELSE i.price END)
+    FROM order_items i JOIN orders o ON i.order_id = o.order_id
+    WHERE o.order_status NOT IN ('canceled', 'unavailable')
+      AND o.order_purchase_timestamp >= DATE '2017-01-01'
+      AND o.order_purchase_timestamp <  DATE '2019-01-01'
+    GROUP BY 1 ORDER BY 1
+
+- id: t3-03
+  question: What was reported revenue in 2018?
+  tier: "3"
+  expected_behavior: answer
+  expected_metric: reported_revenue
+  notes: >-
+    The same metric wholly inside the post-change regime. One consistent definition
+    applies, so the restatement caveat must NOT fire -- a caveat that appears
+    unconditionally teaches the reader to ignore caveats.
+  gold_sql: |
+    SELECT SUM(CASE WHEN o.order_purchase_timestamp < TIMESTAMP '2018-01-01'
+                    THEN i.price + i.freight_value ELSE i.price END)
+    FROM order_items i JOIN orders o ON i.order_id = o.order_id
+    WHERE o.order_status NOT IN ('canceled', 'unavailable')
+      AND o.order_purchase_timestamp >= DATE '2018-01-01'
+      AND o.order_purchase_timestamp <  DATE '2019-01-01'
+
+- id: t3-04
+  question: How much revenue excluding shipping did we book in 2018?
+  tier: "3"
+  expected_behavior: answer
+  expected_metric: net_revenue
+  notes: >-
+    "Revenue" alone is a declared ambiguous term, but "excluding shipping" is a listed
+    synonym of net_revenue and resolves it. The system must notice that the qualifier
+    settles the question rather than refusing on the bare word.
+  gold_sql: |
+    SELECT SUM(i.price)
+    FROM order_items i JOIN orders o ON i.order_id = o.order_id
+    WHERE o.order_status NOT IN ('canceled', 'unavailable')
+      AND o.order_purchase_timestamp >= DATE '2018-01-01'
+      AND o.order_purchase_timestamp <  DATE '2019-01-01'
+
+- id: t3-05
+  question: What was the total amount billed to customers in 2018?
+  tier: "3"
+  expected_behavior: answer
+  expected_metric: gross_revenue
+  notes: >-
+    "Total billed" is a gross_revenue synonym. Billed is the cue: what was invoiced,
+    including freight and including orders later canceled.
+  gold_sql: |
+    SELECT SUM(i.price + i.freight_value)
+    FROM order_items i JOIN orders o ON i.order_id = o.order_id
+    WHERE o.order_purchase_timestamp >= DATE '2018-01-01'
+      AND o.order_purchase_timestamp <  DATE '2019-01-01'
+
+- id: t3-06
+  question: What was our merchandise revenue for 2018?
+  tier: "3"
+  expected_behavior: answer
+  expected_metric: net_revenue
+  notes: >-
+    "Merchandise revenue" is a net_revenue synonym. The near-miss is gross, which adds
+    freight -- 17% of merchandise value in 2018, so the confusion is expensive.
+  gold_sql: |
+    SELECT SUM(i.price)
+    FROM order_items i JOIN orders o ON i.order_id = o.order_id
+    WHERE o.order_status NOT IN ('canceled', 'unavailable')
+      AND o.order_purchase_timestamp >= DATE '2018-01-01'
+      AND o.order_purchase_timestamp <  DATE '2019-01-01'
+
+- id: t3-07
+  question: How many distinct people bought something in 2018?
+  tier: "3"
+  expected_behavior: answer
+  expected_metric: unique_customers
+  requires_caveat: ["customer_unique_id"]
+  notes: >-
+    "Distinct people" resolves the ambiguous word "customers" onto unique_customers. The
+    trap is inside the data: customer_id is issued per order, so the obvious column
+    overstates. The caveat naming customer_unique_id is what shows the trap was avoided.
+  gold_sql: |
+    SELECT count(DISTINCT cu.customer_unique_id)
+    FROM orders o JOIN customers cu ON o.customer_id = cu.customer_id
+    WHERE o.order_purchase_timestamp >= DATE '2018-01-01'
+      AND o.order_purchase_timestamp <  DATE '2019-01-01'
+
+- id: t3-08
+  question: What was the average order value by customer state in 2018?
+  tier: "3"
+  expected_behavior: answer
+  expected_metric: avg_order_value
+  expected_dimensions: [customer_state]
+  notes: >-
+    Legal: customer_state IS in this metric's valid_dimensions, because an order has
+    exactly one customer and therefore one state. The paired illegal case is the same
+    metric by product_category, in the ambiguous file. Answering this one and refusing
+    that one is the discrimination the trap is built to test.
+  gold_sql: |
+    SELECT cu.customer_state, SUM(i.price) / count(DISTINCT i.order_id) AS m
+    FROM order_items i
+    JOIN orders o ON i.order_id = o.order_id
+    JOIN customers cu ON o.customer_id = cu.customer_id
+    WHERE o.order_status NOT IN ('canceled', 'unavailable')
+      AND o.order_purchase_timestamp >= DATE '2018-01-01'
+      AND o.order_purchase_timestamp <  DATE '2019-01-01'
+    GROUP BY 1 ORDER BY m DESC, 1 ASC
+
+- id: t3-09
+  question: What share of deliveries arrived on time or early in 2018?
+  tier: "3"
+  expected_behavior: answer
+  expected_metric: on_time_delivery_rate
+  notes: >-
+    on_time_delivery_rate exists as its own metric rather than being derived as
+    1 - late_delivery_rate. Picking the late metric and inverting it would be a semantic
+    miss even where the arithmetic happens to agree.
+  gold_sql: |
+    SELECT CAST(SUM(CASE WHEN o.order_delivered_customer_date <= o.order_estimated_delivery_date
+                         THEN 1 ELSE 0 END) AS DOUBLE) / NULLIF(count(*), 0)
+    FROM orders o
+    WHERE o.order_status = 'delivered'
+      AND o.order_delivered_customer_date IS NOT NULL
+      AND o.order_purchase_timestamp >= DATE '2018-01-01'
+      AND o.order_purchase_timestamp <  DATE '2019-01-01'
+
+- id: t3-10
+  question: How did reported revenue in the first quarter of 2018 compare with the quarter before it?
+  tier: "3"
+  expected_behavior: answer
+  expected_metric: reported_revenue
+  expected_comparison: previous_period
+  requires_caveat: ["restatement"]
+  notes: >-
+    The nastiest case in the set: a comparison whose two windows sit on opposite sides of
+    the freight restatement. Q4 2017 includes freight as revenue, Q1 2018 does not, so
+    the growth figure is overstated by the freight that left the definition. Both numbers
+    are right and the comparison is not, which is exactly what the caveat is for.
+  gold_sql: |
+    SELECT CASE WHEN o.order_purchase_timestamp >= DATE '2018-01-01'
+                THEN 'current' ELSE 'comparison' END AS comparison_period,
+           SUM(CASE WHEN o.order_purchase_timestamp < TIMESTAMP '2018-01-01'
+                    THEN i.price + i.freight_value ELSE i.price END) AS m
+    FROM order_items i JOIN orders o ON i.order_id = o.order_id
+    WHERE o.order_status NOT IN ('canceled', 'unavailable')
+      AND ((o.order_purchase_timestamp >= DATE '2017-10-01'
+            AND o.order_purchase_timestamp < DATE '2018-01-01')
+        OR (o.order_purchase_timestamp >= DATE '2018-01-01'
+            AND o.order_purchase_timestamp < DATE '2018-04-01'))
+    GROUP BY 1 ORDER BY 1 DESC, m DESC
+
+- id: t3-11
+  question: How many orders did we get in 2018, including ones that were later canceled?
+  tier: "3"
+  expected_behavior: answer
+  expected_metric: order_count
+  requires_caveat: ["canceled"]
+  notes: >-
+    "Including canceled" points at order_count rather than delivered_order_count. The
+    caveat that this counts every status is the confirmation the question was honoured.
+  gold_sql: |
+    SELECT count(DISTINCT o.order_id) FROM orders o
+    WHERE o.order_purchase_timestamp >= DATE '2018-01-01'
+      AND o.order_purchase_timestamp <  DATE '2019-01-01'
+
+- id: t3-12
+  question: What was net revenue in September 2018?
+  tier: "3"
+  expected_behavior: answer
+  expected_metric: net_revenue
+  notes: >-
+    Answerable and nearly worthless as a business figure, which is the point. The data
+    tails off before it stops on 17 October 2018, and September holds exactly one
+    qualifying order. The number is correct; a system that reports it as though it were a
+    normal month is technically right and practically misleading. The sparse tail is
+    stated in the prompt's data window, so the information needed to caveat it is
+    available. Paired with am-20, where the following month has no qualifying data at all.
+  gold_sql: |
+    SELECT SUM(i.price)
+    FROM order_items i JOIN orders o ON i.order_id = o.order_id
+    WHERE o.order_status NOT IN ('canceled', 'unavailable')
+      AND o.order_purchase_timestamp >= DATE '2018-09-01'
+      AND o.order_purchase_timestamp <  DATE '2018-10-01'
+
+- id: t3-13
+  question: What was the average review score for reviews created in the first half of 2018?
+  tier: "3"
+  expected_behavior: answer
+  expected_metric: avg_review_score
+  requires_caveat: ["review creation date"]
+  notes: >-
+    The question says "reviews created", which matches this metric's declared time column
+    -- review_creation_date, not the order's purchase date. Filtering on purchase date
+    would return a different and wrong number, and the caveat naming the review date is
+    how the answer shows which one it used.
+  gold_sql: |
+    SELECT AVG(r.review_score) FROM order_reviews r
+    WHERE r.review_creation_date >= DATE '2018-01-01'
+      AND r.review_creation_date <  DATE '2018-07-01'
+
+- id: t3-14
+  question: How many orders per customer did we average in 2018?
+  tier: "3"
+  expected_behavior: answer
+  expected_metric: orders_per_customer
+  requires_caveat: ["window"]
+  notes: >-
+    A ratio whose value is largely an artefact of the window length: computed inside the
+    requested period, so a shorter window pushes it toward 1.0 by construction. Only
+    comparable across equal-length periods, which the caveat states.
+  gold_sql: |
+    SELECT CAST(count(DISTINCT o.order_id) AS DOUBLE)
+         / NULLIF(count(DISTINCT cu.customer_unique_id), 0)
+    FROM orders o JOIN customers cu ON o.customer_id = cu.customer_id
+    WHERE o.order_purchase_timestamp >= DATE '2018-01-01'
+      AND o.order_purchase_timestamp <  DATE '2019-01-01'
+
+- id: t3-15
+  question: What was the average freight charge per item in 2018?
+  tier: "3"
+  expected_behavior: answer
+  expected_metric: avg_freight_per_item
+  requires_caveat: ["per line item"]
+  notes: >-
+    Per line item, not per order or per shipment: a multi-item order is charged freight
+    once per item, so a per-order reading of this number is wrong by the average basket
+    size. The near-misses are freight_revenue (a total) and avg_item_price (merchandise).
+  gold_sql: |
+    SELECT AVG(i.freight_value)
+    FROM order_items i JOIN orders o ON i.order_id = o.order_id
+    WHERE o.order_status NOT IN ('canceled', 'unavailable')
+      AND o.order_purchase_timestamp >= DATE '2018-01-01'
+      AND o.order_purchase_timestamp <  DATE '2019-01-01'

@@ -1,0 +1,365 @@
+# Tier 2 -- dimension breakdowns, period-over-period comparisons, multiple filters.
+#
+# Everything here is still unambiguous; what is added is structure. These are the cases
+# where a system without a join graph starts double-counting: a breakdown by a dimension
+# that lives two tables away, a comparison that needs two windows in one result, a filter
+# on a joined column.
+#
+# Comparison gold SQL returns two labelled rows, matching the shape the compiler emits:
+# the metric recomputed per period rather than differenced, which is the only treatment
+# that stays correct for a ratio.
+
+- id: t2-01
+  question: Show me net revenue by month in 2018.
+  tier: "2"
+  expected_behavior: answer
+  expected_metric: net_revenue
+  expected_grain: month
+  notes: The basic time series. Ten buckets, since the data stops mid-October.
+  gold_sql: |
+    SELECT date_trunc('month', o.order_purchase_timestamp) AS period, SUM(i.price)
+    FROM order_items i JOIN orders o ON i.order_id = o.order_id
+    WHERE o.order_status NOT IN ('canceled', 'unavailable')
+      AND o.order_purchase_timestamp >= DATE '2018-01-01'
+      AND o.order_purchase_timestamp <  DATE '2019-01-01'
+    GROUP BY 1 ORDER BY 1
+
+- id: t2-02
+  question: What was net revenue by customer state in 2018?
+  tier: "2"
+  expected_behavior: answer
+  expected_metric: net_revenue
+  expected_dimensions: [customer_state]
+  notes: >-
+    Two hops of many-to-one join from the item grain: order_items to orders to customers.
+    Ordered by the metric descending, so row order is compared.
+  gold_sql: |
+    SELECT cu.customer_state, SUM(i.price) AS m
+    FROM order_items i
+    JOIN orders o ON i.order_id = o.order_id
+    JOIN customers cu ON o.customer_id = cu.customer_id
+    WHERE o.order_status NOT IN ('canceled', 'unavailable')
+      AND o.order_purchase_timestamp >= DATE '2018-01-01'
+      AND o.order_purchase_timestamp <  DATE '2019-01-01'
+    GROUP BY 1 ORDER BY m DESC, 1 ASC
+
+- id: t2-03
+  question: Which five product categories brought in the most gross revenue in 2018?
+  tier: "2"
+  expected_behavior: answer
+  expected_metric: gross_revenue
+  expected_dimensions: [product_category_english]
+  notes: >-
+    Top-N with an English category name, which needs a third join through the translation
+    table. 623 product rows have no translation and survive as NULL rather than vanishing.
+  gold_sql: |
+    SELECT t.product_category_name_english, SUM(i.price + i.freight_value) AS m
+    FROM order_items i
+    JOIN orders o ON i.order_id = o.order_id
+    LEFT JOIN products p ON i.product_id = p.product_id
+    LEFT JOIN product_category_translation t
+           ON p.product_category_name = t.product_category_name
+    WHERE o.order_purchase_timestamp >= DATE '2018-01-01'
+      AND o.order_purchase_timestamp <  DATE '2019-01-01'
+    GROUP BY 1 ORDER BY m DESC, 1 ASC LIMIT 5
+
+- id: t2-04
+  question: How many orders were placed each month in 2017?
+  tier: "2"
+  expected_behavior: answer
+  expected_metric: order_count
+  expected_grain: month
+  notes: Order-grain time series, all statuses.
+  gold_sql: |
+    SELECT date_trunc('month', o.order_purchase_timestamp) AS period, count(DISTINCT o.order_id)
+    FROM orders o
+    WHERE o.order_purchase_timestamp >= DATE '2017-01-01'
+      AND o.order_purchase_timestamp <  DATE '2018-01-01'
+    GROUP BY 1 ORDER BY 1
+
+- id: t2-05
+  question: What was net revenue in São Paulo state in 2018?
+  tier: "2"
+  expected_behavior: answer
+  expected_metric: net_revenue
+  notes: >-
+    A filter on a joined dimension rather than a breakdown by it. The state code is SP;
+    the value reaches SQL as a bound literal, never as interpolated text.
+  gold_sql: |
+    SELECT SUM(i.price)
+    FROM order_items i
+    JOIN orders o ON i.order_id = o.order_id
+    JOIN customers cu ON o.customer_id = cu.customer_id
+    WHERE o.order_status NOT IN ('canceled', 'unavailable')
+      AND cu.customer_state = 'SP'
+      AND o.order_purchase_timestamp >= DATE '2018-01-01'
+      AND o.order_purchase_timestamp <  DATE '2019-01-01'
+
+- id: t2-06
+  question: Show net revenue by month in 2018 for São Paulo and Rio de Janeiro states only.
+  tier: "2"
+  expected_behavior: answer
+  expected_metric: net_revenue
+  expected_dimensions: [customer_state]
+  expected_grain: month
+  notes: >-
+    Breakdown, time series, and a multi-value filter at once. SP and RJ are the state
+    codes.
+  gold_sql: |
+    SELECT date_trunc('month', o.order_purchase_timestamp) AS period,
+           cu.customer_state, SUM(i.price) AS m
+    FROM order_items i
+    JOIN orders o ON i.order_id = o.order_id
+    JOIN customers cu ON o.customer_id = cu.customer_id
+    WHERE o.order_status NOT IN ('canceled', 'unavailable')
+      AND cu.customer_state IN ('SP', 'RJ')
+      AND o.order_purchase_timestamp >= DATE '2018-01-01'
+      AND o.order_purchase_timestamp <  DATE '2019-01-01'
+    GROUP BY 1, 2 ORDER BY 1, m DESC, 2 ASC
+
+- id: t2-07
+  question: How did net revenue in March 2018 compare with the month before?
+  tier: "2"
+  expected_behavior: answer
+  expected_metric: net_revenue
+  expected_comparison: previous_period
+  notes: >-
+    Month-over-month. The comparison window must be February, not the 31 days before
+    1 March -- a day-count shift would start it on 29 January.
+  gold_sql: |
+    SELECT CASE WHEN o.order_purchase_timestamp >= DATE '2018-03-01'
+                THEN 'current' ELSE 'comparison' END AS comparison_period,
+           SUM(i.price) AS m
+    FROM order_items i JOIN orders o ON i.order_id = o.order_id
+    WHERE o.order_status NOT IN ('canceled', 'unavailable')
+      AND ((o.order_purchase_timestamp >= DATE '2018-02-01'
+            AND o.order_purchase_timestamp < DATE '2018-03-01')
+        OR (o.order_purchase_timestamp >= DATE '2018-03-01'
+            AND o.order_purchase_timestamp < DATE '2018-04-01'))
+    GROUP BY 1 ORDER BY 1 DESC, m DESC
+
+- id: t2-08
+  question: How did order volume in the first quarter of 2018 compare with the same quarter a year earlier?
+  tier: "2"
+  expected_behavior: answer
+  expected_metric: order_count
+  expected_comparison: previous_year
+  notes: Year-over-year on a quarter. Both windows in one result, labelled.
+  gold_sql: |
+    SELECT CASE WHEN o.order_purchase_timestamp >= DATE '2018-01-01'
+                THEN 'current' ELSE 'comparison' END AS comparison_period,
+           count(DISTINCT o.order_id) AS m
+    FROM orders o
+    WHERE ((o.order_purchase_timestamp >= DATE '2017-01-01'
+            AND o.order_purchase_timestamp < DATE '2017-04-01')
+        OR (o.order_purchase_timestamp >= DATE '2018-01-01'
+            AND o.order_purchase_timestamp < DATE '2018-04-01'))
+    GROUP BY 1 ORDER BY 1 DESC, m DESC
+
+- id: t2-09
+  question: What was the average review score by customer state for reviews written in 2018?
+  tier: "2"
+  expected_behavior: answer
+  expected_metric: avg_review_score
+  expected_dimensions: [customer_state]
+  notes: >-
+    Base is order_reviews, so reaching customer_state goes review to order to customer.
+    "Written in 2018" matches this metric's review-date time column, so the wording and
+    the card agree.
+  gold_sql: |
+    SELECT cu.customer_state, AVG(r.review_score) AS m
+    FROM order_reviews r
+    JOIN orders o ON r.order_id = o.order_id
+    JOIN customers cu ON o.customer_id = cu.customer_id
+    WHERE r.review_creation_date >= DATE '2018-01-01'
+      AND r.review_creation_date <  DATE '2019-01-01'
+    GROUP BY 1 ORDER BY m DESC, 1 ASC
+
+- id: t2-10
+  question: How many orders were delivered in each customer state in 2018?
+  tier: "2"
+  expected_behavior: answer
+  expected_metric: delivered_order_count
+  expected_dimensions: [customer_state]
+  notes: Order-grain count with a breakdown one join away.
+  gold_sql: |
+    SELECT cu.customer_state, count(DISTINCT o.order_id) AS m
+    FROM orders o JOIN customers cu ON o.customer_id = cu.customer_id
+    WHERE o.order_status = 'delivered'
+      AND o.order_purchase_timestamp >= DATE '2018-01-01'
+      AND o.order_purchase_timestamp <  DATE '2019-01-01'
+    GROUP BY 1 ORDER BY m DESC, 1 ASC
+
+- id: t2-11
+  question: How many items were sold per product category in 2018? Give me the top ten.
+  tier: "2"
+  expected_behavior: answer
+  expected_metric: items_sold
+  expected_dimensions: [product_category]
+  notes: >-
+    Unit counts at item grain, where a category breakdown is well defined -- in contrast
+    to average order value, where it is not.
+  gold_sql: |
+    SELECT p.product_category_name, count(*) AS m
+    FROM order_items i
+    JOIN orders o ON i.order_id = o.order_id
+    LEFT JOIN products p ON i.product_id = p.product_id
+    WHERE o.order_status NOT IN ('canceled', 'unavailable')
+      AND o.order_purchase_timestamp >= DATE '2018-01-01'
+      AND o.order_purchase_timestamp <  DATE '2019-01-01'
+    GROUP BY 1 ORDER BY m DESC, 1 ASC LIMIT 10
+
+- id: t2-12
+  question: What was the total payment value by payment type in 2018?
+  tier: "2"
+  expected_behavior: answer
+  expected_metric: total_payment_value
+  expected_dimensions: [payment_type]
+  notes: >-
+    Legal here because the metric's base IS order_payments. The same breakdown on
+    order_count is a fan-out refusal, which is the point of the pair.
+  gold_sql: |
+    SELECT p.payment_type, SUM(p.payment_value) AS m
+    FROM order_payments p JOIN orders o ON p.order_id = o.order_id
+    WHERE o.order_purchase_timestamp >= DATE '2018-01-01'
+      AND o.order_purchase_timestamp <  DATE '2019-01-01'
+    GROUP BY 1 ORDER BY m DESC, 1 ASC
+
+- id: t2-13
+  question: What was the average delivery time by customer state in 2018?
+  tier: "2"
+  expected_behavior: answer
+  expected_metric: avg_delivery_days
+  expected_dimensions: [customer_state]
+  notes: Order grain with both default filters plus the breakdown join.
+  gold_sql: |
+    SELECT cu.customer_state,
+           AVG(date_diff('day', o.order_purchase_timestamp, o.order_delivered_customer_date)) AS m
+    FROM orders o JOIN customers cu ON o.customer_id = cu.customer_id
+    WHERE o.order_status = 'delivered'
+      AND o.order_delivered_customer_date IS NOT NULL
+      AND o.order_purchase_timestamp >= DATE '2018-01-01'
+      AND o.order_purchase_timestamp <  DATE '2019-01-01'
+    GROUP BY 1 ORDER BY m DESC, 1 ASC
+
+- id: t2-14
+  question: Which customer states had the worst late delivery rate in 2018?
+  tier: "2"
+  expected_behavior: answer
+  expected_metric: late_delivery_rate
+  expected_dimensions: [customer_state]
+  notes: >-
+    "Worst" means highest rate, so descending. A ratio computed per group rather than a
+    global rate sliced afterwards.
+  gold_sql: |
+    SELECT cu.customer_state,
+           CAST(SUM(CASE WHEN o.order_delivered_customer_date > o.order_estimated_delivery_date
+                         THEN 1 ELSE 0 END) AS DOUBLE) / NULLIF(count(*), 0) AS m
+    FROM orders o JOIN customers cu ON o.customer_id = cu.customer_id
+    WHERE o.order_status = 'delivered'
+      AND o.order_delivered_customer_date IS NOT NULL
+      AND o.order_purchase_timestamp >= DATE '2018-01-01'
+      AND o.order_purchase_timestamp <  DATE '2019-01-01'
+    GROUP BY 1 ORDER BY m DESC, 1 ASC
+
+- id: t2-15
+  question: How many active sellers were there in each seller state in 2018?
+  tier: "2"
+  expected_behavior: answer
+  expected_metric: active_sellers
+  expected_dimensions: [seller_state]
+  notes: >-
+    A distinct count that is not additive across the breakdown -- a seller active in two
+    states would be counted in each, which the card flags.
+  gold_sql: |
+    SELECT s.seller_state, count(DISTINCT i.seller_id) AS m
+    FROM order_items i
+    JOIN orders o ON i.order_id = o.order_id
+    LEFT JOIN sellers s ON i.seller_id = s.seller_id
+    WHERE o.order_status NOT IN ('canceled', 'unavailable')
+      AND o.order_purchase_timestamp >= DATE '2018-01-01'
+      AND o.order_purchase_timestamp <  DATE '2019-01-01'
+    GROUP BY 1 ORDER BY m DESC, 1 ASC
+
+- id: t2-16
+  question: What was the average item price by product category in 2018? Top five categories.
+  tier: "2"
+  expected_behavior: answer
+  expected_metric: avg_item_price
+  expected_dimensions: [product_category]
+  notes: >-
+    The legal counterpart to "average order value by category". At item grain the
+    attribution is unambiguous, so this one answers.
+  gold_sql: |
+    SELECT p.product_category_name, AVG(i.price) AS m
+    FROM order_items i
+    JOIN orders o ON i.order_id = o.order_id
+    LEFT JOIN products p ON i.product_id = p.product_id
+    WHERE o.order_status NOT IN ('canceled', 'unavailable')
+      AND o.order_purchase_timestamp >= DATE '2018-01-01'
+      AND o.order_purchase_timestamp <  DATE '2019-01-01'
+    GROUP BY 1 ORDER BY m DESC, 1 ASC LIMIT 5
+
+- id: t2-17
+  question: Show net revenue by quarter from the start of 2017 to the end of 2018.
+  tier: "2"
+  expected_behavior: answer
+  expected_metric: net_revenue
+  expected_grain: quarter
+  notes: Quarterly buckets across a two-year span.
+  gold_sql: |
+    SELECT date_trunc('quarter', o.order_purchase_timestamp) AS period, SUM(i.price)
+    FROM order_items i JOIN orders o ON i.order_id = o.order_id
+    WHERE o.order_status NOT IN ('canceled', 'unavailable')
+      AND o.order_purchase_timestamp >= DATE '2017-01-01'
+      AND o.order_purchase_timestamp <  DATE '2019-01-01'
+    GROUP BY 1 ORDER BY 1
+
+- id: t2-18
+  question: How many unique customers ordered each month in 2018?
+  tier: "2"
+  expected_behavior: answer
+  expected_metric: unique_customers
+  expected_grain: month
+  notes: >-
+    Deliberately non-additive: monthly distinct counts do not sum to the annual figure,
+    which the card states and the answer should carry as a caveat.
+  gold_sql: |
+    SELECT date_trunc('month', o.order_purchase_timestamp) AS period,
+           count(DISTINCT cu.customer_unique_id)
+    FROM orders o JOIN customers cu ON o.customer_id = cu.customer_id
+    WHERE o.order_purchase_timestamp >= DATE '2018-01-01'
+      AND o.order_purchase_timestamp <  DATE '2019-01-01'
+    GROUP BY 1 ORDER BY 1
+
+- id: t2-19
+  question: How many payment instruments were used by payment type in 2018?
+  tier: "2"
+  expected_behavior: answer
+  expected_metric: payment_count
+  expected_dimensions: [payment_type]
+  notes: >-
+    Instrument rows, not orders. Exceeds order count by design because split payments
+    contribute more than once.
+  gold_sql: |
+    SELECT p.payment_type, count(*) AS m
+    FROM order_payments p JOIN orders o ON p.order_id = o.order_id
+    WHERE o.order_purchase_timestamp >= DATE '2018-01-01'
+      AND o.order_purchase_timestamp <  DATE '2019-01-01'
+    GROUP BY 1 ORDER BY m DESC, 1 ASC
+
+- id: t2-20
+  question: What was the average number of installments by payment type in 2018?
+  tier: "2"
+  expected_behavior: answer
+  expected_metric: avg_installments
+  expected_dimensions: [payment_type]
+  notes: >-
+    The breakdown that makes the metric interpretable: boleto, voucher and debit all
+    record 1, so the blended average is misleading without it.
+  gold_sql: |
+    SELECT p.payment_type, AVG(p.payment_installments) AS m
+    FROM order_payments p JOIN orders o ON p.order_id = o.order_id
+    WHERE o.order_purchase_timestamp >= DATE '2018-01-01'
+      AND o.order_purchase_timestamp <  DATE '2019-01-01'
+    GROUP BY 1 ORDER BY m DESC, 1 ASC
