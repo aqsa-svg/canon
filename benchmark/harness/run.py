@@ -32,11 +32,14 @@ from benchmark.harness.score import (
     Outcome,
     QuestionScore,
     aggregate,
+    attribute_wrong_answer,
+    behavior_matrix,
     confident_wrong_curve,
-    find_matching_gold,
+    gold_collision_report,
+    paired_discrimination,
     rows_match,
 )
-from canon.agent.llm import MODEL_ID, LlmClient
+from canon.agent.llm import MODEL_ID, CallContext, LlmClient
 from canon.agent.pipeline import CanonPipeline, PipelineResult
 from canon.agent.policy import PolicyThresholds
 from canon.semantic.loader import load_semantic_layer, semantic_layer_hash
@@ -61,9 +64,91 @@ class Provenance(BaseModel):
     model_id: str
     effort: str
     policy_thresholds: PolicyThresholds
+    threshold_provenance: str
+    """Where the two refusal thresholds were tuned. Stated on every run because a
+    threshold fitted to the benchmark would inflate refusal accuracy, the project's most
+    distinctive claim."""
+
     confident_threshold: float
     question_count: int
+    runs: int
     cache_used: bool
+
+
+TUNING_RESULT = REPO_ROOT / "benchmark" / "dev" / "tuning_result.json"
+
+
+def threshold_provenance() -> str:
+    """Where the refusal thresholds come from, derived rather than asserted.
+
+    Recorded on every run because a threshold fitted to the eval set would inflate
+    refusal accuracy, and refusal accuracy is the project's most distinctive claim. A
+    reader has to be able to check that the tuning set and the test set are disjoint.
+
+    Read from the tuning artifact rather than hardcoded, so the sentence cannot drift
+    from what actually happened. No artifact means no validation, and the run says so
+    instead of implying otherwise.
+    """
+    if not TUNING_RESULT.exists():
+        return (
+            "UNVALIDATED: chosen a priori from the design and never fitted to data. "
+            "No eval-set question was used, so refusal accuracy is not inflated by "
+            "threshold leakage -- but the values have also never been checked against "
+            "real model output. Run scripts/tune_thresholds.py against "
+            "benchmark/dev/questions.yaml (14 held-out questions) to validate them."
+        )
+
+    payload = json.loads(TUNING_RESULT.read_text(encoding="utf-8"))
+    chosen = payload["chosen"]
+    return (
+        f"tuned on benchmark/dev/questions.yaml ({payload['dev_question_count']} held-out "
+        f"questions, disjoint from the 80-question eval set) at {payload['tuned_at']} on "
+        f"{payload['model_id']}; chose margin={chosen['metric_score_margin']} "
+        f"min_score={chosen['minimum_top_score']} at "
+        f"{payload['chosen_dev_accuracy']:.0%} dev accuracy. "
+        f"eval_set_used={payload['eval_set_used']}. Frozen thereafter."
+    )
+
+
+_TRACKED_RATES = (
+    "execution_accuracy",
+    "semantic_accuracy",
+    "refusal_accuracy",
+    "silent_wrong_rate",
+    "under_refusal_rate",
+    "over_refusal_rate",
+)
+
+
+def _variance_across_runs(
+    system: str, runs: list[list[QuestionScore]], subset: QuestionSet
+) -> dict[str, Any]:
+    """Spread of each headline rate across independent runs.
+
+    Returns ``null`` for every field when there is only one run: a single sample has no
+    spread, and printing 0.0 would claim a stability that was never measured.
+    """
+    if len(runs) < 2:
+        return {"runs": len(runs), "note": "single run -- no variance measured", "rates": None}
+
+    aggregates = [aggregate(system, scores, subset) for scores in runs]
+    rates: dict[str, Any] = {}
+    for field in _TRACKED_RATES:
+        values = [getattr(item, field) for item in aggregates]
+        present = [value for value in values if value is not None]
+        if not present:
+            rates[field] = None
+            continue
+        mean = sum(present) / len(present)
+        spread = max(present) - min(present)
+        rates[field] = {
+            "mean": round(mean, 4),
+            "min": round(min(present), 4),
+            "max": round(max(present), 4),
+            "range": round(spread, 4),
+            "per_run": present,
+        }
+    return {"runs": len(runs), "rates": rates}
 
 
 def _git(*args: str) -> str:
@@ -140,6 +225,7 @@ def score_canon(
             ),
             confidence=confidence,
             clarifying_question=answer.clarifying_question,
+            gate_flagged=result.verification is not None and not result.verification.passed,
             **common,
         )
 
@@ -154,6 +240,7 @@ def score_canon(
     metric_correct = metric_used == question.expected_metric if question.expected_metric else None
     caveat_text = " ".join(caveat.text for caveat in answer.caveats)
 
+    attribution = attribute_wrong_answer(actual, question.id, gold, questions)
     score = QuestionScore(
         outcome=Outcome.ANSWERED,
         value_correct=value_correct,
@@ -162,12 +249,18 @@ def score_canon(
         refusal_correct=question.expected_behavior.should_answer,
         caveats_surfaced=_caveats_surfaced(question, caveat_text),
         confidence=confidence,
-        matched_other_gold=find_matching_gold(actual, question.id, gold, questions),
+        gate_flagged=False,
+        attribution=attribution.status.value,
+        matched_other_gold=attribution.matched_question_id,
+        attribution_reason=attribution.reason,
         sql=answer.sql,
         **common,
     )
     return score.model_copy(
-        update={"confident_wrong": score.is_wrong_answer and confidence >= CONFIDENT_THRESHOLD}
+        update={
+            "confident_wrong": score.is_wrong_answer and confidence >= CONFIDENT_THRESHOLD,
+            "silent_wrong": score.is_silent_wrong,
+        }
     )
 
 
@@ -182,10 +275,12 @@ def score_baseline(
     ``metric_correct`` stays None throughout: the baseline declares no metric, so there
     is nothing to compare. That is the structural finding, not a gap in the harness.
 
-    Confidence is fixed at 1.0 for every answer it gives. The baseline reports no
-    confidence, and treating a bare number as a confident claim is the honest reading --
-    a system that hands over a figure with no hedge is asserting it. This is why the
-    confident-wrong comparison is meaningful rather than an artefact of scoring.
+    Confidence is imputed as 1.0 for every answer it gives, because the baseline reports
+    none. That imputation is defensible -- handing over a figure with no hedge is an
+    assertion -- but it is still an imputation, which is why confident-wrong is no longer
+    the headline. **Silent-wrong** is, and it needs no imputation: it asks only whether a
+    wrong number arrived with any warning attached, and the baseline has no mechanism to
+    attach one.
     """
     usage = output.usage
     common: dict[str, Any] = {
@@ -229,6 +324,7 @@ def score_baseline(
         expected = tuple(tuple(row) for row in gold[question.id])
         value_correct = rows_match(question, output.rows, expected)
 
+    attribution = attribute_wrong_answer(output.rows, question.id, gold, questions)
     score = QuestionScore(
         outcome=Outcome.ANSWERED,
         value_correct=value_correct,
@@ -236,12 +332,20 @@ def score_baseline(
         metric_used=None,
         refusal_correct=question.expected_behavior.should_answer,
         confidence=1.0,
-        matched_other_gold=find_matching_gold(output.rows, question.id, gold, questions),
+        # Structurally False: the baseline has no verification gate. Recorded rather than
+        # assumed, because that absence is exactly what silent-wrong measures.
+        gate_flagged=False,
+        attribution=attribution.status.value,
+        matched_other_gold=attribution.matched_question_id,
+        attribution_reason=attribution.reason,
         sql=output.sql,
         **common,
     )
     return score.model_copy(
-        update={"confident_wrong": score.is_wrong_answer and CONFIDENT_THRESHOLD <= 1.0}
+        update={
+            "confident_wrong": score.is_wrong_answer and CONFIDENT_THRESHOLD <= 1.0,
+            "silent_wrong": score.is_silent_wrong,
+        }
     )
 
 
@@ -249,6 +353,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--limit", type=int, default=None, help="score only the first N")
     parser.add_argument("--system", choices=["canon", "baseline", "both"], default="both")
+    parser.add_argument("--runs", type=int, default=1, help="independent samples per question")
     parser.add_argument("--no-cache", action="store_true", help="ignore the response cache")
     parser.add_argument("--tag", default=None, help="label for the output directory")
     args = parser.parse_args()
@@ -271,8 +376,10 @@ def main() -> int:
         model_id=MODEL_ID,
         effort=LlmClient().effort,
         policy_thresholds=thresholds,
+        threshold_provenance=threshold_provenance(),
         confident_threshold=CONFIDENT_THRESHOLD,
         question_count=len(selected),
+        runs=args.runs,
         cache_used=not args.no_cache,
     )
 
@@ -282,6 +389,7 @@ def main() -> int:
 
     aggregates: list[Aggregate] = []
     all_scores: dict[str, list[QuestionScore]] = {}
+    per_run: dict[str, list[list[QuestionScore]]] = {}
 
     if args.system in ("canon", "both"):
         client = LlmClient(use_cache=not args.no_cache)
@@ -292,48 +400,76 @@ def main() -> int:
             thresholds=thresholds,
             decision_log=out_dir / "decisions.jsonl",
         )
-        scores: list[QuestionScore] = []
         try:
-            for index, question in enumerate(selected, start=1):
-                result = pipeline.answer(question.question)
-                score = score_canon(question, result, gold, subset)
-                scores.append(score)
-                print(
-                    f"[canon {index}/{len(selected)}] {question.id:8} "
-                    f"{score.outcome.value:8} "
-                    f"value={score.value_correct} metric={score.metric_used or '-'}"
-                )
+            for run_index in range(args.runs):
+                scores = []
+                for index, question in enumerate(selected, start=1):
+                    result = pipeline.answer(
+                        question.question,
+                        CallContext(system="canon", question_id=question.id, run_index=run_index),
+                    )
+                    score = score_canon(question, result, gold, subset)
+                    scores.append(score)
+                    print(
+                        f"[canon r{run_index} {index}/{len(selected)}] {question.id:8} "
+                        f"{score.outcome.value:8} "
+                        f"value={score.value_correct} metric={score.metric_used or '-'}"
+                    )
+                per_run.setdefault("canon", []).append(scores)
         finally:
             pipeline.close()
-        all_scores["canon"] = scores
-        aggregates.append(aggregate("canon", scores, subset))
+        all_scores["canon"] = per_run["canon"][0]
+        aggregates.append(aggregate("canon", per_run["canon"][0], subset))
 
     if args.system in ("baseline", "both"):
         client = LlmClient(use_cache=not args.no_cache)
         baseline = NaiveBaseline(db_path=DB_PATH, client=client)
-        scores = []
         try:
-            for index, question in enumerate(selected, start=1):
-                output = baseline.answer(question.question)
-                score = score_baseline(question, output, gold, subset)
-                scores.append(score)
-                print(
-                    f"[baseline {index}/{len(selected)}] {question.id:8} "
-                    f"{score.outcome.value:8} value={score.value_correct}"
-                )
+            for run_index in range(args.runs):
+                scores = []
+                for index, question in enumerate(selected, start=1):
+                    output = baseline.answer(
+                        question.question,
+                        CallContext(
+                            system="baseline", question_id=question.id, run_index=run_index
+                        ),
+                    )
+                    score = score_baseline(question, output, gold, subset)
+                    scores.append(score)
+                    print(
+                        f"[baseline r{run_index} {index}/{len(selected)}] {question.id:8} "
+                        f"{score.outcome.value:8} value={score.value_correct}"
+                    )
+                per_run.setdefault("baseline", []).append(scores)
         finally:
             baseline.close()
-        all_scores["baseline"] = scores
-        aggregates.append(aggregate("baseline", scores, subset))
+        all_scores["baseline"] = per_run["baseline"][0]
+        aggregates.append(aggregate("baseline", per_run["baseline"][0], subset))
 
-    for system, scores in all_scores.items():
-        with (out_dir / f"{system}.jsonl").open("w", encoding="utf-8") as handle:
-            for score in scores:
-                handle.write(json.dumps(score.model_dump(mode="json"), sort_keys=True) + "\n")
+    for system, runs in per_run.items():
+        for run_index, scores in enumerate(runs):
+            name = f"{system}.jsonl" if run_index == 0 else f"{system}.run{run_index}.jsonl"
+            with (out_dir / name).open("w", encoding="utf-8") as handle:
+                for score in scores:
+                    handle.write(json.dumps(score.model_dump(mode="json"), sort_keys=True) + "\n")
 
     payload = {
         "provenance": provenance.model_dump(mode="json"),
         "aggregates": [item.model_dump(mode="json") for item in aggregates],
+        "per_run_aggregates": {
+            system: [aggregate(system, scores, subset).model_dump(mode="json") for scores in runs]
+            for system, runs in per_run.items()
+        },
+        "variance": {
+            system: _variance_across_runs(system, runs, subset) for system, runs in per_run.items()
+        },
+        "behavior_matrix": {
+            system: behavior_matrix(scores) for system, scores in all_scores.items()
+        },
+        "paired_discrimination": {
+            system: paired_discrimination(scores) for system, scores in all_scores.items()
+        },
+        "attribution_instrument": gold_collision_report(gold),
         "confident_wrong_curve": {
             system: confident_wrong_curve(scores) for system, scores in all_scores.items()
         },
@@ -341,7 +477,16 @@ def main() -> int:
     (out_dir / "report.json").write_text(
         json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8"
     )
-    write_report(out_dir / "report.md", provenance, aggregates, all_scores)
+    write_report(
+        out_dir / "report.md",
+        provenance,
+        aggregates,
+        all_scores,
+        matrices=payload["behavior_matrix"],
+        pairs=payload["paired_discrimination"],
+        attribution=payload["attribution_instrument"],
+        variance=payload["variance"],
+    )
 
     print(f"\nwrote {out_dir.relative_to(REPO_ROOT)}/report.md")
     return 0

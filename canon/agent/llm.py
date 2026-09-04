@@ -28,7 +28,7 @@ from typing import Final, TypeVar
 
 import anthropic
 from dotenv import load_dotenv
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 # Reads .env if present, without overriding a key already exported in the shell. Called
 # at import so every entry point -- harness, Streamlit, a REPL -- picks the key up the
@@ -90,8 +90,37 @@ class LlmError(RuntimeError):
     """
 
 
+class CallContext(BaseModel):
+    """Identifies *which* call this is, not just what was asked.
+
+    Without this the cache is keyed on content alone, so asking the same question three
+    times returns the same stored answer three times. That would make runs 2 and 3
+    replays of run 1 and any reported variance identically zero -- a number that looks
+    like a measurement and is an artefact of the cache.
+
+    With ``run_index`` in the key, each run is a fresh sample. The cache still does its
+    job across *sessions*: re-running run 2 tomorrow replays run 2, so a scoring change
+    can be attributed to the scoring change.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    system: str
+    """Which system under test -- 'canon' or 'baseline'. Keeps their caches disjoint
+    even where the question text is identical."""
+
+    question_id: str
+    run_index: int = Field(ge=0)
+
+
 def _cache_key(
-    system: str, question: str, schema_name: str, schema: str, effort: str, model: str
+    system: str,
+    question: str,
+    schema_name: str,
+    schema: str,
+    effort: str,
+    model: str,
+    context: CallContext | None,
 ) -> str:
     payload = json.dumps(
         {
@@ -101,6 +130,9 @@ def _cache_key(
             "schema": schema,
             "system": system,
             "question": question,
+            # Omitted entirely when there is no context, so the demo and ad-hoc use keep
+            # content-only keying and get cache hits, which is what you want there.
+            "context": context.model_dump(mode="json") if context else None,
         },
         sort_keys=True,
     )
@@ -147,7 +179,12 @@ class LlmClient:
         return self._client
 
     def structured(
-        self, *, system: str, question: str, output_format: type[ModelT]
+        self,
+        *,
+        system: str,
+        question: str,
+        output_format: type[ModelT],
+        context: CallContext | None = None,
     ) -> tuple[ModelT, Usage]:
         """One call, one validated object.
 
@@ -156,7 +193,9 @@ class LlmClient:
         under test rather than noise to be smoothed away.
         """
         schema = json.dumps(output_format.model_json_schema(), sort_keys=True)
-        key = _cache_key(system, question, output_format.__name__, schema, self.effort, self.model)
+        key = _cache_key(
+            system, question, output_format.__name__, schema, self.effort, self.model, context
+        )
         path = self.cache_dir / f"{key}.json"
 
         if self.use_cache and path.exists():
@@ -223,12 +262,14 @@ class LlmClient:
             )
         return parsed, usage
 
-    def freeform(self, *, system: str, question: str) -> tuple[str, Usage]:
+    def freeform(
+        self, *, system: str, question: str, context: CallContext | None = None
+    ) -> tuple[str, Usage]:
         """A plain text response. Used only by the naive baseline, which writes SQL.
 
         Cached identically, so the two systems are compared under the same conditions.
         """
-        key = _cache_key(system, question, "freeform", "", self.effort, self.model)
+        key = _cache_key(system, question, "freeform", "", self.effort, self.model, context)
         path = self.cache_dir / f"{key}.json"
 
         if self.use_cache and path.exists():

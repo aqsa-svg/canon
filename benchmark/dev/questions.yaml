@@ -1,0 +1,122 @@
+# Dev set -- 14 questions for tuning the two refusal thresholds. NOT part of the eval.
+#
+# Why this file exists: `metric_score_margin` and `minimum_top_score` in
+# canon/agent/policy.py decide when Canon asks instead of answering. Tuning them on the
+# 80-question eval set would fit the thresholds to the test set and inflate refusal
+# accuracy -- which is the project's most distinctive claim, so it is the worst possible
+# place to leak.
+#
+# These 14 questions are disjoint from all 80. They cover the same behaviour classes so
+# the tuning signal is representative:
+#
+#   answer  (6): clear metric, breakdown, comparison, synonym resolution
+#   clarify (5): metric ambiguity, unanchored time, wrong grain, fan-out
+#   refuse  (3): metric not in the catalogue at all
+#
+# There is no gold SQL here on purpose. Threshold tuning only needs the ask-or-answer
+# decision, and adding gold values would invite using this file as a second eval set,
+# which it is not powered to be.
+
+- id: dev-01
+  question: What was net revenue in the second quarter of 2018?
+  expected_behavior: answer
+  expected_metric: net_revenue
+  notes: Clear metric, explicit period. Baseline competence; must not be refused.
+
+- id: dev-02
+  question: How many orders were delivered in June 2018?
+  expected_behavior: answer
+  expected_metric: delivered_order_count
+  notes: Distinguishes delivered from placed. A single clear month.
+
+- id: dev-03
+  question: Show me gross revenue by month in 2017.
+  expected_behavior: answer
+  expected_metric: gross_revenue
+  notes: Named metric plus a breakdown. Tests that structure does not trigger a refusal.
+
+- id: dev-04
+  question: What was the average review score by review score band in 2018?
+  expected_behavior: clarify
+  expected_metric: avg_review_score
+  notes: >-
+    Self-referential and incoherent -- averaging a score grouped by itself. Should be
+    questioned rather than answered with the tautology it would produce.
+
+- id: dev-05
+  question: How much did we bill customers including shipping in 2017?
+  expected_behavior: answer
+  expected_metric: gross_revenue
+  notes: >-
+    "Including shipping" resolves the revenue ambiguity onto gross. Tests that a
+    qualifier lifts a term out of the ambiguous list rather than being ignored.
+
+- id: dev-06
+  question: How did net revenue in July 2018 compare with June?
+  expected_behavior: answer
+  expected_metric: net_revenue
+  notes: Month-over-month with both months named. Comparison machinery, unambiguous.
+
+- id: dev-07
+  question: What was the average delivery time in Bahia in 2018?
+  expected_behavior: answer
+  expected_metric: avg_delivery_days
+  notes: >-
+    A filter on a joined dimension by state name rather than code. Clear metric, so a
+    refusal here would be an over-refusal.
+
+- id: dev-08
+  question: How much money did the business bring in?
+  expected_behavior: clarify
+  expected_metric: null
+  notes: >-
+    Metric ambiguous (which revenue) and no period at all. The clearest clarify case in
+    the dev set; if the threshold cannot catch this it is set far too low.
+
+- id: dev-09
+  question: What are our numbers looking like lately?
+  expected_behavior: clarify
+  expected_metric: null
+  notes: No metric, no period, no breakdown. Degenerate vagueness.
+
+- id: dev-10
+  question: Break average order value down by seller state.
+  expected_behavior: clarify
+  expected_metric: avg_order_value
+  notes: >-
+    Wrong grain: an order can contain items from several sellers, so its value cannot be
+    assigned to one seller state. The compiler rejects it before execution and the
+    policy has to turn that into a question.
+
+- id: dev-11
+  question: How many orders used a credit card in 2018?
+  expected_behavior: clarify
+  expected_metric: order_count
+  notes: >-
+    Fan-out: payment type lives one-to-many under an order, so counting orders by
+    payment type would double-count split payments.
+
+- id: dev-12
+  question: What was revenue in the last six months?
+  expected_behavior: clarify
+  expected_metric: null
+  notes: >-
+    Two independent gaps: which revenue definition, and six months before what -- the
+    warehouse has no today.
+
+- id: dev-13
+  question: What is our gross margin percentage?
+  expected_behavior: refuse
+  expected_metric: null
+  notes: >-
+    No cost data exists. The failure to catch is substituting a revenue metric; the
+    minimum_top_score threshold is what should prevent that.
+
+- id: dev-14
+  question: How many support tickets did we receive last quarter?
+  expected_behavior: refuse
+  expected_metric: null
+  notes: >-
+    There is no support data in the warehouse at all. Tests that an entirely absent
+    subject is refused rather than mapped onto reviews, which are the nearest thing and
+    a different concept.

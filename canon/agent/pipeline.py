@@ -17,7 +17,7 @@ from pathlib import Path
 import duckdb
 from pydantic import BaseModel, ConfigDict
 
-from canon.agent.llm import LlmClient, LlmError, Usage
+from canon.agent.llm import CallContext, LlmClient, LlmError, Usage
 from canon.agent.policy import (
     PolicyOutcome,
     PolicyThresholds,
@@ -123,13 +123,19 @@ class CanonPipeline:
         return build_system_prompt(self.layer, self.window)
 
     # -- the path ----------------------------------------------------------------
-    def answer(self, question: str) -> PipelineResult:
-        """One question, one structured call, one verified answer or one question back."""
+    def answer(self, question: str, context: CallContext | None = None) -> PipelineResult:
+        """One question, one structured call, one verified answer or one question back.
+
+        ``context`` identifies which benchmark run this call belongs to, so repeat runs
+        are independent samples instead of cache replays. Left unset outside the
+        harness, where content-only cache keying is what you want.
+        """
         try:
             decision, usage = self.client.structured(
                 system=self.system_prompt,
                 question=question,
                 output_format=AgentDecision,
+                context=context,
             )
         except LlmError as error:
             return PipelineResult(

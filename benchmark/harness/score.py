@@ -9,9 +9,16 @@ One asymmetry is deliberate and is the finding rather than a flaw in the measure
 it used.** Canon returns a metric card, so its metric choice can be checked against gold.
 The baseline has no notion of a metric, so there is nothing to check — which is precisely
 the gap §3.2 argues Spider and BIRD cannot see. For the baseline, a wrong metric choice
-shows up as an execution-accuracy failure instead, and `matched_other_gold` names the
-question whose gold value its number *did* match, which is direct evidence of which
-definition it actually computed.
+shows up as an execution-accuracy failure instead, and ``attribute_wrong_answer`` tries to
+name the definition it actually computed by matching its number against other questions'
+gold values. That instrument is guarded and its coverage is measured
+(``gold_collision_report``), because on this eval set most gold values either repeat
+across questions or are too small to distinguish — so an unguarded version would assert
+far more than the data supports.
+
+The headline safety metric is **silent-wrong rate**: wrong, with neither a gate flag nor
+a clarifying question to warn anyone. It reads only what each system observably did, so
+unlike confident-wrong it needs no imputed confidence for a system that reports none.
 """
 
 from __future__ import annotations
@@ -190,10 +197,32 @@ class QuestionScore(BaseModel):
 
     confidence: float = 0.0
     confident_wrong: bool = False
+
+    gate_flagged: bool = False
+    """Whether the verification gate rejected the result.
+
+    The baseline is always False here, and not because it passed: it has no gate. That
+    asymmetry is the finding, so it is recorded per question rather than assumed.
+    """
+
+    silent_wrong: bool = False
+    """Wrong, and nothing said so.
+
+    The headline safety number. A wrong answer the system flagged or asked about is a
+    caught error; a wrong answer handed over clean is the one that reaches a slide and
+    gets acted on. Unlike confident-wrong this needs no imputed confidence -- it reads
+    only what each system observably did.
+    """
+
+    attribution: str = "no_match"
+    """Whether a wrong answer could be traced to another question's gold value:
+    no_match, attributable_wrong, or unattributable_wrong."""
+
     matched_other_gold: str | None = None
-    """The id of another question whose gold value this answer matched. Evidence of which
-    definition was actually computed, and the only semantic signal available for a system
-    that declares no metric."""
+    """The question whose gold value this answer matched, set only when the attribution
+    is ATTRIBUTABLE. Evidence of which definition was actually computed."""
+
+    attribution_reason: str | None = None
 
     sql: str | None = None
     clarifying_question: str | None = None
@@ -210,6 +239,20 @@ class QuestionScore(BaseModel):
         if not self.expected_behavior.should_answer:
             return True
         return self.value_correct is False or self.metric_correct is False
+
+    @property
+    def is_silent_wrong(self) -> bool:
+        """Wrong, with neither a gate flag nor a clarifying question to warn anyone."""
+        return self.is_wrong_answer and not self.gate_flagged and self.clarifying_question is None
+
+    @property
+    def is_caught_wrong(self) -> bool:
+        """Declined to answer a question where answering would have been wrong.
+
+        The counterpart to ``is_silent_wrong``: both describe cases the system got no
+        number right, and the difference is whether anyone was told.
+        """
+        return self.outcome is Outcome.ASKED and not self.expected_behavior.should_answer
 
 
 class Aggregate(BaseModel):
@@ -229,12 +272,36 @@ class Aggregate(BaseModel):
     declares no metric, which is reported rather than papered over."""
 
     refusal_accuracy: float | None = None
+    behavior_accuracy: float | None = None
+    """Fraction on the 3x3 diagonal -- did the system do the right *kind* of thing?
+
+    Stricter than refusal accuracy, which only asks whether it answered or asked. A
+    system that declines an ambiguous question by claiming the metric is undefined gets
+    credit from refusal accuracy and not from this.
+    """
+
     under_refusal_rate: float | None = None
     over_refusal_rate: float | None = None
     names_the_fork_rate: float | None = None
     caveat_surfaced_rate: float | None = None
     caveat_measurable: int = 0
+
+    silent_wrong_rate: float | None = None
+    """The headline: wrong answers handed over with no signal, over all questions."""
+
+    silent_wrong_count: int = 0
+    caught_wrong_count: int = 0
+    """Cases the system declined to answer or flagged, where answering would have been
+    wrong. The baseline's gate count is structurally zero."""
+
+    gate_flagged_count: int = 0
+    attributable_wrong_count: int = 0
+    unattributable_wrong_count: int = 0
+
     confident_wrong_rate: float | None = None
+    """Secondary. Depends on imputing confidence 1.0 to the baseline, which is why it is
+    no longer the headline -- see the footnote in RESULTS.md."""
+
     error_rate: float | None = None
 
     mean_latency_seconds: float | None = None
@@ -252,6 +319,8 @@ class TierAggregate(BaseModel):
     execution_accuracy: float | None = None
     semantic_accuracy: float | None = None
     refusal_accuracy: float | None = None
+    behavior_accuracy: float | None = None
+    silent_wrong_rate: float | None = None
     confident_wrong_rate: float | None = None
 
 
@@ -259,28 +328,166 @@ def _rate(numerator: int, denominator: int) -> float | None:
     return None if denominator == 0 else round(numerator / denominator, 4)
 
 
-def find_matching_gold(
+MIN_ATTRIBUTION_MAGNITUDE = 1000.0
+"""Below this, a scalar match is not evidence of anything.
+
+Small numbers collide by coincidence. The eval set contains counts like 334 canceled
+orders and averages like a 4.086 review score, and two unrelated questions landing on
+the same small value says nothing about which definition was computed. Money and volume
+figures in the thousands are distinctive enough to carry an inference.
+"""
+
+
+class Attribution(StrEnum):
+    """How much weight a value-collision finding can bear."""
+
+    NO_MATCH = "no_match"
+    """The answer matched no other question's gold value."""
+
+    ATTRIBUTABLE = "attributable_wrong"
+    """Matched exactly one other question, whose gold value is unique across the set and
+    large enough not to collide by chance. Evidence of which definition was computed."""
+
+    UNATTRIBUTABLE = "unattributable_wrong"
+    """Matched something, but the match cannot identify a definition -- the value is
+    shared by several questions, or too small to be distinctive. Recorded as wrong
+    without a claim about *why*."""
+
+
+class AttributionResult(BaseModel):
+    """The finding, with its own reliability attached."""
+
+    model_config = _FROZEN
+
+    status: Attribution
+    matched_question_id: str | None = None
+    matched_count: int = 0
+    reason: str | None = None
+
+
+def _signature(rows: tuple[tuple[Any, ...], ...]) -> str:
+    """A comparable fingerprint of a result, for detecting shared gold values."""
+    return "|".join(
+        ";".join(
+            f"{cell:.9g}" if isinstance(cell, float) else str(_decimalise(cell)) for cell in row
+        )
+        for row in rows
+    )
+
+
+def _is_distinctive(rows: tuple[tuple[Any, ...], ...]) -> bool:
+    """Whether a result is large enough that a match is unlikely to be coincidence."""
+    for row in rows:
+        for cell in row:
+            value = _decimalise(cell)
+            numeric = isinstance(value, Decimal | int | float) and not isinstance(value, bool)
+            if numeric and abs(float(value)) >= MIN_ATTRIBUTION_MAGNITUDE:
+                return True
+    return False
+
+
+def gold_collision_report(gold_values: dict[str, list[list[Any]]]) -> dict[str, Any]:
+    """The instrument's stated error bar.
+
+    Measures how much of the gold set can support an attribution at all: how many gold
+    values are shared between questions, and how many are too small to be distinctive.
+    An instrument with no known false-positive rate should not be quoted, so this is
+    computed and reported alongside anything derived from it.
+    """
+    signatures: dict[str, list[str]] = {}
+    for question_id, rows in gold_values.items():
+        signatures.setdefault(_signature(tuple(tuple(r) for r in rows)), []).append(question_id)
+
+    shared = {sig: ids for sig, ids in signatures.items() if len(ids) > 1}
+    small = [
+        question_id
+        for question_id, rows in gold_values.items()
+        if not _is_distinctive(tuple(tuple(r) for r in rows))
+    ]
+    ambiguous_ids = {qid for ids in shared.values() for qid in ids}
+    usable = [qid for qid in gold_values if qid not in ambiguous_ids and qid not in set(small)]
+    return {
+        "total_gold_values": len(gold_values),
+        "shared_value_groups": sorted(sorted(ids) for ids in shared.values()),
+        "questions_with_shared_values": len(ambiguous_ids),
+        "questions_below_magnitude_threshold": len(small),
+        "questions_supporting_attribution": len(usable),
+        "attribution_coverage": (round(len(usable) / len(gold_values), 4) if gold_values else None),
+        "magnitude_threshold": MIN_ATTRIBUTION_MAGNITUDE,
+    }
+
+
+def attribute_wrong_answer(
     actual: tuple[tuple[Any, ...], ...],
     question_id: str,
     gold_values: dict[str, list[list[Any]]],
     questions: QuestionSet,
-) -> str | None:
-    """Which other question's gold value does this answer equal?
+) -> AttributionResult:
+    """Which other question's gold value does this answer equal, if that is knowable?
 
-    Cheap, deterministic evidence of a definition confusion: if a system asked for
-    revenue-excluding-shipping returns the number that gold says is gross revenue for the
-    same period, it computed the wrong definition. No LLM judge, no extra queries.
+    Cheap, deterministic evidence of a definition confusion -- a system asked for
+    revenue-excluding-shipping that returns the gross figure computed the wrong
+    definition. Guarded three ways, because the unguarded version asserts more than the
+    data supports:
+
+    * a value shared by several questions cannot identify one of them;
+    * a value below the magnitude threshold could collide by chance;
+    * more than one distinct matching value means the collision is not informative.
     """
     if not actual:
-        return None
+        return AttributionResult(status=Attribution.NO_MATCH)
+
     by_id = {item.id: item for item in questions.questions}
+    signature_owners: dict[str, list[str]] = {}
+    for other_id, other_rows in gold_values.items():
+        key = _signature(tuple(tuple(r) for r in other_rows))
+        signature_owners.setdefault(key, []).append(other_id)
+
+    matches: list[str] = []
     for other_id, other_rows in sorted(gold_values.items()):
         if other_id == question_id or other_id not in by_id:
             continue
         expected = tuple(tuple(row) for row in other_rows)
         if rows_match(by_id[other_id], actual, expected):
-            return other_id
-    return None
+            matches.append(other_id)
+
+    if not matches:
+        return AttributionResult(status=Attribution.NO_MATCH)
+
+    if not _is_distinctive(actual):
+        return AttributionResult(
+            status=Attribution.UNATTRIBUTABLE,
+            matched_count=len(matches),
+            reason=(
+                f"every value is below the {MIN_ATTRIBUTION_MAGNITUDE:g} magnitude "
+                "threshold, so the match could be coincidence"
+            ),
+        )
+
+    distinct = {_signature(tuple(tuple(r) for r in gold_values[m])) for m in matches}
+    if len(distinct) > 1:
+        return AttributionResult(
+            status=Attribution.UNATTRIBUTABLE,
+            matched_count=len(matches),
+            reason=f"matched {len(matches)} questions with differing values",
+        )
+
+    owners = [
+        owner for owner in signature_owners.get(next(iter(distinct)), []) if owner != question_id
+    ]
+    if len(owners) > 1:
+        return AttributionResult(
+            status=Attribution.UNATTRIBUTABLE,
+            matched_count=len(owners),
+            reason=(
+                "this value is the gold answer for "
+                f"{', '.join(sorted(owners))}, so it cannot identify one of them"
+            ),
+        )
+
+    return AttributionResult(
+        status=Attribution.ATTRIBUTABLE, matched_question_id=matches[0], matched_count=1
+    )
 
 
 def aggregate(system: str, scores: list[QuestionScore], questions: QuestionSet) -> Aggregate:
@@ -305,6 +512,11 @@ def aggregate(system: str, scores: list[QuestionScore], questions: QuestionSet) 
     fork_pool = [s for s in ambiguous if s.names_the_fork is not None]
     caveat_pool = [s for s in scores if s.caveats_surfaced is not None]
 
+    silent_wrong = [s for s in scores if s.is_silent_wrong]
+    caught = [
+        s for s in scores if s.outcome is Outcome.ASKED and not s.expected_behavior.should_answer
+    ]
+
     per_tier: dict[str, TierAggregate] = {}
     for tier in sorted({s.tier for s in scores}):
         subset = [s for s in scores if s.tier == tier]
@@ -328,6 +540,8 @@ def aggregate(system: str, scores: list[QuestionScore], questions: QuestionSet) 
                 sum(1 for s in tier_semantic if s.metric_correct), len(tier_semantic)
             ),
             refusal_accuracy=_rate(tier_correct_attempts + tier_correct_refusals, len(subset)),
+            behavior_accuracy=_rate(sum(1 for s in subset if behavior_correct(s)), len(subset)),
+            silent_wrong_rate=_rate(sum(1 for s in subset if s.is_silent_wrong), len(subset)),
             confident_wrong_rate=_rate(sum(1 for s in subset if s.confident_wrong), len(subset)),
         )
 
@@ -341,6 +555,7 @@ def aggregate(system: str, scores: list[QuestionScore], questions: QuestionSet) 
         semantic_accuracy=_rate(semantic_correct, len(semantic_pool)),
         semantic_measurable=len(semantic_pool),
         refusal_accuracy=_rate(correct_attempts + correct_refusals, len(scores)),
+        behavior_accuracy=_rate(sum(1 for s in scores if behavior_correct(s)), len(scores)),
         under_refusal_rate=_rate(under_refusals, len(ambiguous)),
         over_refusal_rate=_rate(over_refusals, len(answerable)),
         names_the_fork_rate=_rate(sum(1 for s in fork_pool if s.names_the_fork), len(fork_pool)),
@@ -348,6 +563,14 @@ def aggregate(system: str, scores: list[QuestionScore], questions: QuestionSet) 
             sum(1 for s in caveat_pool if s.caveats_surfaced), len(caveat_pool)
         ),
         caveat_measurable=len(caveat_pool),
+        silent_wrong_rate=_rate(len(silent_wrong), len(scores)),
+        silent_wrong_count=len(silent_wrong),
+        caught_wrong_count=len(caught),
+        gate_flagged_count=sum(1 for s in scores if s.gate_flagged),
+        attributable_wrong_count=sum(1 for s in scores if s.attribution == "attributable_wrong"),
+        unattributable_wrong_count=sum(
+            1 for s in scores if s.attribution == "unattributable_wrong"
+        ),
         confident_wrong_rate=_rate(sum(1 for s in scores if s.confident_wrong), len(scores)),
         error_rate=_rate(sum(1 for s in scores if s.outcome is Outcome.ERRORED), len(scores)),
         mean_latency_seconds=(
@@ -359,6 +582,122 @@ def aggregate(system: str, scores: list[QuestionScore], questions: QuestionSet) 
         cached_fraction=_rate(sum(1 for s in scores if s.cached), len(scores)),
         per_tier=per_tier,
     )
+
+
+def actual_behavior(score: QuestionScore) -> str:
+    """What the system actually did, in the eval set's own vocabulary.
+
+    Mapped to answer / clarify / refuse so target and actual are comparable in one
+    matrix. A system that asks is doing the same *act* whether the question was merely
+    underspecified or wholly unanswerable, so the distinction between clarify and refuse
+    lives in what it said, not in whether it asked: a refusal names the metric as
+    undefined, a clarification names a fork it could resolve.
+    """
+    if score.outcome is Outcome.ERRORED:
+        return "error"
+    if score.outcome is Outcome.ANSWERED:
+        return "answer"
+    asked = (score.clarifying_question or "").lower()
+    declines = any(
+        phrase in asked
+        for phrase in ("not defined", "cannot answer", "not a defined", "does not exist")
+    )
+    return "refuse" if declines else "clarify"
+
+
+def behavior_correct(score: QuestionScore) -> bool:
+    """Whether the act matched the target exactly, on the 3x3 diagonal."""
+    return actual_behavior(score) == score.expected_behavior.value
+
+
+def behavior_matrix(scores: list[QuestionScore]) -> dict[str, dict[str, int]]:
+    """Target behaviour x actual behaviour, 3x3 plus an error column.
+
+    Not collapsed to 2x2, because the off-diagonals mean different things:
+    answer-when-should-clarify is a trust failure -- a number nobody should act on --
+    while refuse-when-should-clarify is a usability failure, annoying and safe. Summing
+    them into one "refusal accuracy" hides which kind of system you have.
+    """
+    targets = ("answer", "clarify", "refuse")
+    actuals = ("answer", "clarify", "refuse", "error")
+    matrix = {target: dict.fromkeys(actuals, 0) for target in targets}
+    for score in scores:
+        target = score.expected_behavior.value
+        if target in matrix:
+            matrix[target][actual_behavior(score)] += 1
+    return matrix
+
+
+PAIRED_DISCRIMINATIONS: tuple[tuple[str, str, str], ...] = (
+    (
+        "avg_order_value grain",
+        "t3-08",
+        "am-13",
+    ),
+    (
+        "payment_type fan-out",
+        "t2-12",
+        "am-14",
+    ),
+    (
+        "reported_revenue restatement caveat",
+        "t3-02",
+        "t3-03",
+    ),
+)
+"""Deliberately paired items, scored as both-halves-correct.
+
+Each pair is one question a reflex answers wrongly: the two halves look alike and
+require opposite responses. A system that always answers gets the first half of each
+pair and fails the second; one that always asks does the reverse. Only a system that
+actually consulted the definitions gets both, which is why this number is the one immune
+to a reflex strategy.
+"""
+
+
+def paired_discrimination(scores: list[QuestionScore]) -> dict[str, Any]:
+    """Score each pair as a single item: both halves right, or the pair is wrong."""
+    by_id = {score.question_id: score for score in scores}
+    results: list[dict[str, Any]] = []
+    for label, left_id, right_id in PAIRED_DISCRIMINATIONS:
+        left, right = by_id.get(left_id), by_id.get(right_id)
+        if left is None or right is None:
+            continue
+
+        def half_correct(score: QuestionScore) -> bool:
+            """One half is right only if it is right in every way that pair tests.
+
+            The caveat clause matters: the restatement pair is two `answer` cases, so
+            behaviour alone cannot separate them. What separates them is the caveat
+            firing on the range that spans the definition change and staying silent on
+            the range that does not. Without this clause an always-answer system won
+            that pair, which would have made the headline paired number overstate.
+            """
+            if not behavior_correct(score):
+                return False
+            if score.caveats_surfaced is False:
+                return False
+            if score.expected_behavior.should_answer:
+                return score.value_correct is True and score.metric_correct is not False
+            return True
+
+        results.append(
+            {
+                "pair": label,
+                "left": left_id,
+                "right": right_id,
+                "left_correct": half_correct(left),
+                "right_correct": half_correct(right),
+                "both_correct": half_correct(left) and half_correct(right),
+            }
+        )
+    scored = results
+    return {
+        "pairs": results,
+        "pairs_scored": len(scored),
+        "both_correct": sum(1 for item in scored if item["both_correct"]),
+        "rate": _rate(sum(1 for item in scored if item["both_correct"]), len(scored)),
+    }
 
 
 def confident_wrong_curve(scores: list[QuestionScore]) -> dict[str, float | None]:

@@ -39,6 +39,11 @@ def write_report(
     provenance: Provenance,
     aggregates: list[Aggregate],
     scores: dict[str, list[QuestionScore]],
+    *,
+    matrices: dict[str, dict[str, dict[str, int]]] | None = None,
+    pairs: dict[str, dict[str, Any]] | None = None,
+    attribution: dict[str, Any] | None = None,
+    variance: dict[str, dict[str, Any]] | None = None,
 ) -> None:
     by_system = {item.system: item for item in aggregates}
     canon = by_system.get("canon")
@@ -77,14 +82,16 @@ def write_report(
     lines.append(divider)
 
     rows: list[tuple[str, str, str, bool]] = [
+        ("**Silent-wrong rate**", "all", "silent_wrong_rate", False),
         ("Execution accuracy", "answerable", "execution_accuracy", True),
         ("**Semantic accuracy**", "answerable, measurable", "semantic_accuracy", True),
-        ("Refusal accuracy", "all", "refusal_accuracy", True),
+        ("Behaviour accuracy (3x3 diagonal)", "all", "behavior_accuracy", True),
+        ("Refusal accuracy (ask vs answer)", "all", "refusal_accuracy", True),
         ("— under-refusal rate", "should-not-answer", "under_refusal_rate", False),
         ("— over-refusal rate", "answerable", "over_refusal_rate", False),
         ("— names the fork (proxy)", "should-not-answer", "names_the_fork_rate", True),
         ("Caveat surfaced", "cases requiring one", "caveat_surfaced_rate", True),
-        ("**Confident-wrong rate**", "all", "confident_wrong_rate", False),
+        ("Confident-wrong rate [1]", "all", "confident_wrong_rate", False),
         ("Error rate", "all", "error_rate", False),
     ]
     for label, denominator, field, higher_better in rows:
@@ -109,6 +116,36 @@ def write_report(
         lines.append(line)
     lines.append("")
 
+    lines.append(
+        "**Silent-wrong** is the headline safety number: the system handed over a wrong "
+        "number with neither a verification flag nor a clarifying question attached. It "
+        "compares observable behaviour, so it needs no assumption about how confident "
+        "either system was.\n"
+    )
+    lines.append(
+        "[1] **Confident-wrong** is secondary because it depends on an imputation: the "
+        "baseline reports no confidence, so every answer it gives is scored at 1.0. That "
+        "is a defensible reading -- a figure handed over with no hedge is an assertion -- "
+        "but it is still an assumption, and a reviewer is right to discount a headline "
+        "that rests on one. Silent-wrong does not.\n"
+    )
+
+    if canon is not None or baseline is not None:
+        lines.append("### Wrong answers: caught vs. silent\n")
+        lines.append(
+            "The mechanisms each system has for not being silently wrong. The baseline's "
+            "zeros are structural -- it has no gate and no refusal path beyond the one "
+            "the prompt grants it -- which is the finding rather than a scoring artefact.\n"
+        )
+        lines.append("| System | silent wrong | gate-flagged | declined to answer |")
+        lines.append("|---|---|---|---|")
+        for item in aggregates:
+            lines.append(
+                f"| {item.system} | {item.silent_wrong_count} | {item.gate_flagged_count} | "
+                f"{item.caught_wrong_count} |"
+            )
+        lines.append("")
+
     if baseline is not None and baseline.semantic_measurable == 0:
         lines.append(
             "**On the baseline's semantic accuracy.** It is `n/a` because the baseline "
@@ -116,10 +153,9 @@ def write_report(
             "finding rather than a gap in the harness: a system with no semantic layer "
             "cannot say which definition produced its number, which is exactly the blind "
             "spot `docs/01-evaluation.md` §3.2 argues Spider and BIRD share. For the "
-            "baseline, a wrong metric choice surfaces as an execution-accuracy failure, "
-            "and the `matched_other_gold` column below names the question whose gold "
-            "value its answer *did* equal — direct evidence of which definition it "
-            "actually computed.\n"
+            "baseline, a wrong metric choice surfaces as an execution-accuracy failure "
+            "instead, and the attribution instrument below tries to name the definition "
+            "it actually computed — subject to the coverage limit stated there.\n"
         )
 
     lines.append("## Per tier\n")
@@ -137,6 +173,121 @@ def write_report(
                 f"{_pct(entry.refusal_accuracy)} | {_pct(entry.confident_wrong_rate)} |"
             )
     lines.append("")
+
+    if matrices:
+        lines.append("## Behaviour matrix (3x3)\n")
+        lines.append(
+            "Target behaviour against what the system actually did. Not collapsed to "
+            "2x2, because the off-diagonals are different failures:\n\n"
+            "- **answer when it should clarify** — a *trust* failure. A number reaches "
+            "someone who had no way to know the question was ambiguous.\n"
+            "- **clarify when it should answer** — a *usability* failure. Annoying, "
+            "safe, and cheap to fix by lowering the margin.\n"
+            "- **refuse when it should clarify** — a *capability* failure. The system "
+            "said it could not help with something it could have resolved by asking.\n"
+            "- **clarify when it should refuse** — a *scope* failure. It offered to "
+            "resolve a question the warehouse cannot answer at any level of detail.\n"
+        )
+        for system, matrix in matrices.items():
+            lines.append(f"### {system}\n")
+            lines.append("| target ↓ / actual → | answer | clarify | refuse | error |")
+            lines.append("|---|---|---|---|---|")
+            for target in ("answer", "clarify", "refuse"):
+                row = matrix[target]
+                cells = " | ".join(
+                    str(row[actual]) for actual in ("answer", "clarify", "refuse", "error")
+                )
+                lines.append(f"| **{target}** | {cells} |")
+            lines.append("")
+
+    if pairs:
+        lines.append("## Paired discrimination\n")
+        lines.append(
+            "Deliberately paired items, scored as **both halves correct**. Each pair "
+            "looks alike and requires opposite responses, so a system with a reflex gets "
+            "exactly one half of each pair and scores zero here. **This is the number "
+            "immune to a reflex strategy** — always-answer and always-ask both score 0%, "
+            "verified in the test suite.\n"
+        )
+        lines.append("| System | pairs | both halves correct | rate |")
+        lines.append("|---|---|---|---|")
+        for system, result in pairs.items():
+            lines.append(
+                f"| {system} | {result['pairs_scored']} | {result['both_correct']} | "
+                f"{_pct(result['rate'])} |"
+            )
+        lines.append("")
+        for system, result in pairs.items():
+            lines.append(f"**{system}** per pair:\n")
+            for entry in result["pairs"]:
+                left = "correct" if entry["left_correct"] else "WRONG"
+                right = "correct" if entry["right_correct"] else "WRONG"
+                verdict = "PASS" if entry["both_correct"] else "FAIL"
+                lines.append(
+                    f"- {entry['pair']}: {entry['left']} {left}, {entry['right']} {right} "
+                    f"→ **{verdict}**"
+                )
+            lines.append("")
+
+    if attribution is not None:
+        lines.append("## Attribution instrument — stated error bar\n")
+        lines.append(
+            "When a system returns a wrong number, the harness checks whether that number "
+            "is another question's gold answer, which would say *which* definition it "
+            "actually computed. That inference is only sound where the matched value is "
+            "unique across the eval set and large enough not to collide by chance, so "
+            "coverage is measured and reported rather than assumed.\n"
+        )
+        lines.append("| Property | Value |")
+        lines.append("|---|---|")
+        lines.append(f"| gold values | {attribution['total_gold_values']} |")
+        lines.append(
+            f"| shared between questions | {attribution['questions_with_shared_values']} |"
+        )
+        lines.append(
+            f"| below magnitude threshold ({attribution['magnitude_threshold']:g}) | "
+            f"{attribution['questions_below_magnitude_threshold']} |"
+        )
+        lines.append(
+            f"| **can support an attribution** | "
+            f"{attribution['questions_supporting_attribution']} "
+            f"({_pct(attribution['attribution_coverage'])}) |"
+        )
+        lines.append("")
+        if attribution["shared_value_groups"]:
+            lines.append("Questions sharing a gold value, so a match cannot identify one:\n")
+            for group in attribution["shared_value_groups"]:
+                lines.append(f"- {', '.join(group)}")
+            lines.append("")
+        for item in aggregates:
+            lines.append(
+                f"- {item.system}: {item.attributable_wrong_count} attributable, "
+                f"{item.unattributable_wrong_count} unattributable"
+            )
+        lines.append("")
+
+    if variance:
+        lines.append("## Variance across runs\n")
+        for system, data in variance.items():
+            if data.get("rates") is None:
+                lines.append(
+                    f"- **{system}**: {data.get('note', 'no variance measured')}. "
+                    "No spread is reported rather than printing 0.0, which would claim a "
+                    "stability that was never measured.\n"
+                )
+                continue
+            lines.append(f"### {system} — {data['runs']} independent runs\n")
+            lines.append("| Metric | mean | min | max | range |")
+            lines.append("|---|---|---|---|---|")
+            for field, stats in data["rates"].items():
+                if stats is None:
+                    lines.append(f"| {field} | n/a | n/a | n/a | n/a |")
+                    continue
+                lines.append(
+                    f"| {field} | {_pct(stats['mean'])} | {_pct(stats['min'])} | "
+                    f"{_pct(stats['max'])} | {stats['range'] * 100:.1f}pp |"
+                )
+            lines.append("")
 
     lines.append("## Confident-wrong across thresholds\n")
     lines.append(

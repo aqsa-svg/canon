@@ -35,7 +35,7 @@ from pathlib import Path
 import duckdb
 from pydantic import BaseModel, ConfigDict
 
-from canon.agent.llm import LlmClient, LlmError, Usage
+from canon.agent.llm import CallContext, LlmClient, LlmError, Usage
 from canon.agent.prompt import DataWindow
 
 _FROZEN = ConfigDict(frozen=True, extra="forbid")
@@ -188,10 +188,12 @@ class NaiveBaseline:
             f"## SCHEMA\n\n{self.ddl}\n"
         )
 
-    def answer(self, question: str) -> BaselineOutput:
+    def answer(self, question: str, context: CallContext | None = None) -> BaselineOutput:
         """One call, then execute whatever came back. No validation in between."""
         try:
-            text, usage = self.client.freeform(system=self.system_prompt, question=question)
+            text, usage = self.client.freeform(
+                system=self.system_prompt, question=question, context=context
+            )
         except LlmError as error:
             return BaselineOutput(
                 question=question,

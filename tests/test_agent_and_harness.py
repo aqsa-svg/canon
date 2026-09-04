@@ -17,13 +17,19 @@ import pytest
 
 from benchmark.harness.dataset import Behavior, QuestionSet, Tier, load_questions
 from benchmark.harness.score import (
+    Attribution,
     Outcome,
     QuestionScore,
+    actual_behavior,
     aggregate,
+    attribute_wrong_answer,
+    behavior_correct,
+    behavior_matrix,
     cells_equal,
     confident_wrong_curve,
-    find_matching_gold,
+    gold_collision_report,
     order_matters,
+    paired_discrimination,
     rows_match,
 )
 from canon.agent.policy import (
@@ -211,16 +217,52 @@ class TestScoringRules:
         expected = ((date(2018, 1, 1), Decimal("1")), (date(2018, 2, 1), Decimal("2")))
         assert not rows_match(question, ((date(2018, 1, 1), Decimal("1")),), expected)
 
-    def test_matching_another_questions_gold_is_detected(self, questions, gold) -> None:
-        """The baseline's only semantic signal: which definition did it actually compute?
+    def test_a_shared_gold_value_cannot_be_attributed(self, questions, gold) -> None:
+        """Gross revenue 2018 is the gold answer for two questions, so a match is mute.
 
-        Feeding t3-01's gold value (gross revenue 2018) in as an answer to t1-01 (net
-        revenue 2018) must point at t3-01.
+        The unguarded version of this instrument named whichever id sorted first, which
+        asserted a definition it could not actually distinguish. Now it says so.
         """
         gross_rows = tuple(tuple(row) for row in gold["t3-01"])
-        matched = find_matching_gold(gross_rows, "t1-01", gold, questions)
-        assert matched is not None
-        assert matched in {"t3-01", "t3-05"}  # both are gross revenue 2018
+        result = attribute_wrong_answer(gross_rows, "t1-01", gold, questions)
+        assert result.status is Attribution.UNATTRIBUTABLE
+        assert result.matched_question_id is None
+        assert "t3-01" in (result.reason or "") and "t3-05" in (result.reason or "")
+
+    def test_a_small_value_match_is_not_attributed(self, questions, gold) -> None:
+        """Counts in the hundreds collide by chance, so a match proves nothing."""
+        small = tuple(tuple(row) for row in gold["t1-05"])  # 334 canceled orders
+        result = attribute_wrong_answer(small, "t1-03", gold, questions)
+        assert result.status is Attribution.UNATTRIBUTABLE
+        assert "magnitude" in (result.reason or "")
+
+    def test_a_unique_large_value_is_attributed(self, questions, gold) -> None:
+        """A distinctive, unshared gold value can identify the definition computed.
+
+        t1-02 is gross revenue for 2017 -- seven figures, and the gold answer for no
+        other question -- so answering it in place of something else is traceable.
+        """
+        target = "t1-02"
+        report = gold_collision_report(gold)
+        shared = {qid for group in report["shared_value_groups"] for qid in group}
+        assert target not in shared, f"{target} is no longer a unique value; pick another"
+
+        result = attribute_wrong_answer(
+            tuple(tuple(row) for row in gold[target]), "t1-01", gold, questions
+        )
+        assert result.status is Attribution.ATTRIBUTABLE
+        assert result.matched_question_id == target
+        assert result.matched_count == 1
+
+    def test_the_instrument_reports_its_own_coverage(self, gold) -> None:
+        """An instrument with no stated error bar should not be quoted."""
+        report = gold_collision_report(gold)
+        assert report["total_gold_values"] == 55
+        assert report["attribution_coverage"] is not None
+        # Most of this eval set cannot support an attribution, which is worth knowing
+        # before any conclusion is drawn from one.
+        assert 0.0 < report["attribution_coverage"] < 1.0
+        assert report["questions_supporting_attribution"] < report["total_gold_values"]
 
 
 class TestDegenerateStrategiesArePunished:
@@ -547,3 +589,220 @@ class TestPromptAndSchema:
             intent=QueryIntent(metric=MetricName.NET_REVENUE),
         )
         assert single.score_gap == 1.0
+
+
+class TestCacheKeyingMakesRunsIndependent:
+    """Fix 2: runs 2 and 3 must be fresh samples, not replays of run 1."""
+
+    def test_run_index_changes_the_cache_key(self) -> None:
+        from canon.agent.llm import CallContext, _cache_key
+
+        base = {
+            "system": "sys",
+            "question": "q",
+            "schema_name": "AgentDecision",
+            "schema": "{}",
+            "effort": "medium",
+            "model": "claude-opus-5",
+        }
+        first = _cache_key(
+            **base, context=CallContext(system="canon", question_id="t1-01", run_index=0)
+        )
+        second = _cache_key(
+            **base, context=CallContext(system="canon", question_id="t1-01", run_index=1)
+        )
+        assert first != second, (
+            "identical keys across runs would make every reported variance exactly 0.0, "
+            "which looks like a measurement and is an artefact of the cache"
+        )
+
+    def test_the_two_systems_do_not_share_cache_entries(self) -> None:
+        from canon.agent.llm import CallContext, _cache_key
+
+        base = {
+            "system": "sys",
+            "question": "q",
+            "schema_name": "AgentDecision",
+            "schema": "{}",
+            "effort": "medium",
+            "model": "claude-opus-5",
+        }
+        canon = _cache_key(
+            **base, context=CallContext(system="canon", question_id="t1-01", run_index=0)
+        )
+        baseline = _cache_key(
+            **base, context=CallContext(system="baseline", question_id="t1-01", run_index=0)
+        )
+        assert canon != baseline
+
+    def test_no_context_keeps_content_only_keying(self) -> None:
+        """The demo wants cache hits, so an absent context must not vary the key."""
+        from canon.agent.llm import _cache_key
+
+        base = {
+            "system": "sys",
+            "question": "q",
+            "schema_name": "AgentDecision",
+            "schema": "{}",
+            "effort": "medium",
+            "model": "claude-opus-5",
+        }
+        assert _cache_key(**base, context=None) == _cache_key(**base, context=None)
+
+
+class TestSilentWrongIsTheHeadline:
+    """Fix 3: compare observable behaviour, not an imputed confidence."""
+
+    def _score(self, **kwargs: object) -> QuestionScore:
+        defaults: dict[str, object] = {
+            "question_id": "x-01",
+            "question": "q",
+            "tier": "1",
+            "expected_behavior": Behavior.ANSWER,
+            "outcome": Outcome.ANSWERED,
+            "value_correct": False,
+        }
+        defaults.update(kwargs)
+        score = QuestionScore(**defaults)  # type: ignore[arg-type]
+        return score.model_copy(update={"silent_wrong": score.is_silent_wrong})
+
+    def test_a_wrong_answer_with_no_warning_is_silent(self) -> None:
+        assert self._score().silent_wrong
+
+    def test_a_gate_flagged_wrong_answer_is_not_silent(self) -> None:
+        """The gate said something, so nobody was misled."""
+        assert not self._score(gate_flagged=True).silent_wrong
+
+    def test_a_clarified_case_is_not_silent(self) -> None:
+        score = self._score(
+            outcome=Outcome.ASKED, clarifying_question="which revenue did you mean?"
+        )
+        assert not score.silent_wrong
+
+    def test_a_correct_answer_is_not_silent(self) -> None:
+        assert not self._score(value_correct=True).silent_wrong
+
+    def test_silent_wrong_needs_no_imputed_confidence(self) -> None:
+        """The same verdict at any confidence -- which is the point of replacing
+        confident-wrong as the headline."""
+        assert self._score(confidence=0.0).silent_wrong
+        assert self._score(confidence=1.0).silent_wrong
+
+
+class TestBehaviorMatrixAndPairs:
+    """Fix: a 3x3 matrix, because the off-diagonals are different failures."""
+
+    def _asked(self, expected: Behavior, text: str) -> QuestionScore:
+        return QuestionScore(
+            question_id="x",
+            question="q",
+            tier="ambiguous",
+            expected_behavior=expected,
+            outcome=Outcome.ASKED,
+            clarifying_question=text,
+        )
+
+    def test_a_clarification_and_a_refusal_are_told_apart(self) -> None:
+        """Both ask, but one names a resolvable fork and the other says it cannot."""
+        clarified = self._asked(Behavior.CLARIFY, "Do you mean gross_revenue or net_revenue?")
+        refused = self._asked(Behavior.REFUSE, "I cannot answer that: margin is not defined.")
+        assert actual_behavior(clarified) == "clarify"
+        assert actual_behavior(refused) == "refuse"
+
+    def test_refusing_when_it_should_clarify_is_off_diagonal(self) -> None:
+        """A usability failure -- safe, and still not correct."""
+        score = self._asked(Behavior.CLARIFY, "I cannot answer that, it is not defined.")
+        assert not behavior_correct(score)
+        matrix = behavior_matrix([score])
+        assert matrix["clarify"]["refuse"] == 1
+        assert matrix["clarify"]["clarify"] == 0
+
+    def test_answering_when_it_should_clarify_is_the_trust_failure(self) -> None:
+        score = QuestionScore(
+            question_id="x",
+            question="q",
+            tier="ambiguous",
+            expected_behavior=Behavior.CLARIFY,
+            outcome=Outcome.ANSWERED,
+            value_correct=None,
+        )
+        matrix = behavior_matrix([score])
+        assert matrix["clarify"]["answer"] == 1
+
+    def test_the_matrix_is_three_by_three_plus_errors(self) -> None:
+        matrix = behavior_matrix([])
+        assert set(matrix) == {"answer", "clarify", "refuse"}
+        assert set(matrix["answer"]) == {"answer", "clarify", "refuse", "error"}
+
+    def test_a_reflex_strategy_cannot_win_the_paired_items(self, questions) -> None:
+        """The paired score is the number immune to always-answer and always-ask.
+
+        Each pair needs opposite responses, so a system with one reflex gets exactly one
+        half of each pair and scores zero on both-halves-correct.
+        """
+        always_answer = [
+            QuestionScore(
+                question_id=item.id,
+                question=item.question,
+                tier=item.tier.value,
+                expected_behavior=item.expected_behavior,
+                outcome=Outcome.ANSWERED,
+                value_correct=True if item.expected_behavior.should_answer else None,
+                metric_correct=True if item.expected_metric else None,
+                # A system with no caveat mechanism -- what the scorer computes for the
+                # baseline on any question that requires one.
+                caveats_surfaced=False if item.requires_caveat else None,
+            )
+            for item in questions.questions
+        ]
+        always_ask = [
+            QuestionScore(
+                question_id=item.id,
+                question=item.question,
+                tier=item.tier.value,
+                expected_behavior=item.expected_behavior,
+                outcome=Outcome.ASKED,
+                clarifying_question="Do you mean gross_revenue or net_revenue?",
+            )
+            for item in questions.questions
+        ]
+        answered = paired_discrimination(always_answer)
+        asked = paired_discrimination(always_ask)
+        assert answered["pairs_scored"] >= 2
+        assert answered["both_correct"] == 0, "always-answer must fail every pair"
+        assert asked["both_correct"] == 0, "always-ask must fail every pair"
+
+
+class TestThresholdProvenanceIsHonest:
+    """Fix 1: the provenance sentence has to be checkable, not asserted."""
+
+    def test_it_says_unvalidated_when_no_tuning_artifact_exists(self) -> None:
+        from benchmark.harness.run import TUNING_RESULT, threshold_provenance
+
+        claim = threshold_provenance()
+        if TUNING_RESULT.exists():
+            assert "tuned on benchmark/dev/questions.yaml" in claim
+            assert "eval_set_used=False" in claim
+        else:
+            assert claim.startswith("UNVALIDATED")
+
+    def test_the_dev_set_is_disjoint_from_the_eval_set(self, questions) -> None:
+        """The whole point of the dev set. Overlap would be leakage."""
+        import yaml
+
+        dev_path = Path(__file__).resolve().parent.parent / "benchmark" / "dev" / "questions.yaml"
+        dev = yaml.safe_load(dev_path.read_text(encoding="utf-8"))
+        dev_texts = {item["question"].strip().lower() for item in dev}
+        eval_texts = {item.question.strip().lower() for item in questions.questions}
+        assert not (dev_texts & eval_texts), "a dev question also appears in the eval set"
+        dev_ids = {item["id"] for item in dev}
+        assert not (dev_ids & {item.id for item in questions.questions})
+        assert 12 <= len(dev) <= 15
+
+    def test_the_dev_set_covers_every_behavior_class(self) -> None:
+        import yaml
+
+        dev_path = Path(__file__).resolve().parent.parent / "benchmark" / "dev" / "questions.yaml"
+        dev = yaml.safe_load(dev_path.read_text(encoding="utf-8"))
+        behaviors = {item["expected_behavior"] for item in dev}
+        assert behaviors == {"answer", "clarify", "refuse"}
