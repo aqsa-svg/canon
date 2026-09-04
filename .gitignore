@@ -20,3 +20,4 @@ benchmark/runs/
 # benchmark run outputs are reproducible from the cache; the report is committed by hand
 benchmark/runs/
 data/llm_cache/
+data/quota_ledger.json

@@ -1,0 +1,84 @@
+# Free-tier provider configuration.
+#
+# The whole benchmark must be reproducible for $0, so these ceilings are not operational
+# trivia -- they determine what can be measured at all. At roughly 23k tokens a question,
+# a 200,000 token/day budget is about eight questions per system per day. The sweep plan
+# in RESULTS.md follows from these numbers.
+#
+# `verified: false` means the figure was taken from the provider's documentation as of
+# writing but has NOT been re-checked on this machine. Free-tier limits change without
+# notice, so the dry-run labels any projection built on unverified limits rather than
+# presenting it as fact. Check and flip the flag before quoting a wall-clock estimate.
+#
+# `temperature: 0.0` wherever the provider accepts it. Determinism is not achievable via
+# sampling on every backend -- current Anthropic models reject the parameter outright --
+# so reproducibility comes from the response cache. Setting it where possible costs
+# nothing and removes one source of drift.
+
+groq:
+  name: groq
+  model_id: openai/gpt-oss-120b
+  context_limit: 131072
+  max_output_tokens: 8192
+  temperature: 0.0
+  reasoning_effort: medium
+  notes: >-
+    Primary provider. Structured output via tool-calling, because this model exposes
+    function calling rather than a native JSON-schema response mode. Tokenised locally
+    with tiktoken's o200k_harmony encoding, which is the GPT-OSS harmony tokenizer, so
+    the dry-run token counts for this provider are exact rather than estimated.
+  limits:
+    requests_per_minute: 30
+    tokens_per_minute: 8000
+    requests_per_day: 1000
+    tokens_per_day: 200000
+    source: >-
+      Groq free-tier limits for openai/gpt-oss-120b as stated in the project brief.
+      tokens_per_minute is the conservative figure; the binding constraint is
+      tokens_per_day.
+    verified: false
+
+gemini:
+  name: gemini
+  model_id: gemini-2.5-flash
+  context_limit: 1048576
+  max_output_tokens: 8192
+  temperature: 0.0
+  notes: >-
+    Second provider, used for the cross-model robustness check rather than the headline.
+    Uses native response_schema structured output, so the schema is enforced by the API
+    rather than by prompt instruction. NOTE ON DATA POLICY: Google's free tier may use
+    submitted prompts and responses to improve their products. The warehouse is a public
+    dataset and the questions are synthetic, so nothing confidential is at stake here --
+    but this is why Gemini is the secondary provider and why the README says so plainly.
+    Token counts for this provider are APPROXIMATE: there is no local tokenizer, so the
+    dry-run uses o200k_base as a proxy and labels the figure.
+  limits:
+    requests_per_minute: 10
+    tokens_per_minute: 250000
+    requests_per_day: 250
+    tokens_per_day: null
+    source: >-
+      Google AI Studio free tier for the current Flash model, from provider docs at time
+      of writing. Free-tier quotas for Gemini have changed repeatedly; re-check before
+      quoting.
+    verified: false
+
+anthropic:
+  name: anthropic
+  model_id: claude-opus-5
+  context_limit: 1000000
+  max_output_tokens: 8192
+  temperature: null
+  reasoning_effort: medium
+  notes: >-
+    Retained so the paid path can be swapped back in unchanged, and so the earlier
+    design is not lost. NOT free tier: every call is billed, which is why it is not the
+    default. Current Anthropic models reject `temperature`, hence null.
+  limits:
+    requests_per_minute: 50
+    tokens_per_minute: 40000
+    requests_per_day: null
+    tokens_per_day: null
+    source: Paid-tier limits vary by account; these are placeholders and not a free tier.
+    verified: false

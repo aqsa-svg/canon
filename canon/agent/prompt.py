@@ -156,3 +156,136 @@ sparse, so a question about the final period may be answerable but unrepresentat
 
 {metrics}
 """
+
+
+# ---------------------------------------------------------------------------
+# Two-stage prompting
+# ---------------------------------------------------------------------------
+# Full stuffing pays for all 24 complete cards on every question, whether or not the
+# detail is needed. On a paid tier that is a cost line; on a 200,000 token/day free tier
+# it is the difference between measuring 8 questions a day and measuring the benchmark.
+#
+# Stage A shows just enough to *choose*: name, one line, synonyms, legal breakdowns.
+# Stage B shows one complete card -- expression, grain, default filters, caveats, and the
+# definition change if it has one -- for the metric stage A picked.
+#
+# The claim that this is cheaper is arithmetic. The claim that it is as *accurate* is not,
+# so it is measured as an ablation and reported either way.
+
+
+def _render_short_card(card: MetricCard) -> str:
+    """A metric in four lines: enough to pick it, not enough to compute it."""
+    lines = [f"- {card.name}: {_first_line(card.description)}"]
+    if card.synonyms:
+        lines.append(f"    also called: {', '.join(sorted(card.synonyms))}")
+    lines.append(
+        "    breaks down by: "
+        + (", ".join(sorted(card.valid_dimensions)) if card.valid_dimensions else "nothing")
+    )
+    return "\n".join(lines)
+
+
+def _first_line(text: str) -> str:
+    """The first sentence of a description, collapsed to one line."""
+    cleaned = " ".join(text.split())
+    for stop in (". ", "; "):
+        if stop in cleaned:
+            return cleaned.split(stop)[0].rstrip(".") + "."
+    return cleaned
+
+
+STAGE_A_INSTRUCTIONS = """\
+You match business questions to metrics from a fixed catalogue. You never write SQL.
+
+You see a short summary of each metric -- enough to choose between them. Once you choose,
+the full definition of that one metric is shown to you and you fill in the query details
+in a second step. So right now, choose; do not try to specify the query.
+
+For every question:
+
+1. Score every metric that could plausibly be meant, in `candidates`. Score on fit to the
+   question's wording and intent, not on which metric is more commonly asked about.
+   - One clear match: score it high and nothing else near it.
+   - Two genuinely plausible readings: score both close together. Close scores are how
+     you report that the question is ambiguous, which is a correct and useful answer here.
+
+2. Set `chosen_metric` to the single best match, OR leave it null and list
+   `missing_information` when the question does not determine one.
+
+Rules:
+
+- A term under AMBIGUOUS TERMS has no default. If the question turns on one and gives
+  nothing else to settle it, leave `chosen_metric` null -- do not pick the likelier one.
+- If the question needs something the catalogue does not cover (margin, profit, CAC, LTV,
+  inventory, ad spend, returns, churn, support tickets), leave `chosen_metric` null and
+  say the metric is not defined. Do not substitute the nearest available metric.
+- A metric can only be broken down by the dimensions listed against it. Where a breakdown
+  is excluded, the query would run and the number would be wrong.
+- There is no "today". The data ends on a fixed date given below, so "recently", "last
+  month" or "this quarter" without an anchoring date is missing information.
+- `reading` is your one-sentence paraphrase of the question. Write it before choosing.
+"""
+
+STAGE_B_INSTRUCTIONS = """\
+The metric has already been chosen. Its complete definition is below, including its
+caveats and any default filters. Your job is to fill in the query details: time range,
+grain, breakdowns, filters, comparison.
+
+- Time ranges are half-open: start inclusive, end exclusive. One month is
+  start=2018-03-01, end=2018-04-01. A full year is start=2018-01-01, end=2019-01-01.
+- Only use the dimensions listed against this metric.
+- For period-over-period questions set `comparison` and a bounded `time_range`; the
+  compiler derives the earlier window. Do not compute it, and do not pass a `limit`
+  alongside a comparison.
+- `metric` in your intent must be exactly the metric named below.
+- If the full definition reveals the question cannot be answered as asked -- a caveat that
+  contradicts it, or a breakdown this metric forbids -- say so in `missing_information`
+  rather than forcing an intent. Choosing a metric in the previous step does not commit
+  you to answering.
+"""
+
+
+def build_stage_a_prompt(layer: SemanticLayer, window: DataWindow) -> str:
+    """Short-form catalogue: every metric, four lines each."""
+    cards = "\n".join(_render_short_card(layer.metrics[name]) for name in sorted(layer.metrics))
+    return f"""{STAGE_A_INSTRUCTIONS}
+
+## DATA WINDOW
+
+Orders span {window.first_order} to {window.last_order} inclusive. Nothing exists outside
+that range, and the final weeks are very sparse.
+
+## AMBIGUOUS TERMS -- no default exists for these
+
+{_render_ambiguous(layer)}
+
+## METRIC CATALOGUE -- {len(layer.metrics)} metrics, short form, complete list
+
+{cards}
+"""
+
+
+def build_stage_b_prompt(layer: SemanticLayer, window: DataWindow, metric_name: str) -> str:
+    """Full card for one metric, plus the dimensions it actually permits."""
+    card = layer.metrics[metric_name]
+    dimensions = (
+        "\n".join(
+            f"- {name}: {layer.dimensions[name].description.strip()}"
+            for name in sorted(card.valid_dimensions)
+        )
+        or "- (this metric supports no breakdowns)"
+    )
+    return f"""{STAGE_B_INSTRUCTIONS}
+
+## DATA WINDOW
+
+Orders span {window.first_order} to {window.last_order} inclusive.
+
+## THE CHOSEN METRIC
+
+{_render_metric(card)}
+
+## DIMENSIONS THIS METRIC PERMITS
+
+{dimensions}
+"""

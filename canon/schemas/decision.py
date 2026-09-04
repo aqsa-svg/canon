@@ -103,3 +103,69 @@ class AgentDecision(BaseModel):
         if len(ranked) == 1:
             return 1.0
         return ranked[0].score - ranked[1].score
+
+
+class MetricSelection(BaseModel):
+    """Stage A of the two-stage prompt: choose a metric from short-form cards.
+
+    Stage A sees only name, one-line description, synonyms and valid_dimensions for every
+    metric — enough to *choose*, not enough to fill in an intent. The full card for the
+    chosen metric arrives in stage B.
+
+    The split exists because of a free-tier token budget: stuffing all 24 full cards costs
+    the same on every question whether or not the detail is needed. Whether the saving
+    costs accuracy is measured rather than assumed — see the ablation in RESULTS.md.
+    """
+
+    model_config = _FROZEN
+
+    reading: str
+    candidates: tuple[MetricCandidate, ...] = Field(min_length=1)
+    chosen_metric: MetricName | None = None
+    """The metric to fetch a full card for. ``None`` means stage B is skipped entirely,
+    which is the cheap path for an unanswerable question."""
+
+    missing_information: tuple[str, ...] = ()
+    proposed_clarification: str | None = None
+
+    @model_validator(mode="after")
+    def _check_coherence(self) -> MetricSelection:
+        if len(self.candidates) != len({item.metric for item in self.candidates}):
+            raise ValueError("candidates must not score the same metric twice")
+        if self.chosen_metric is None and not (
+            self.missing_information or self.proposed_clarification
+        ):
+            raise ValueError(
+                "declining to choose a metric requires saying what is missing: fill "
+                "missing_information or proposed_clarification"
+            )
+        return self
+
+
+class IntentFill(BaseModel):
+    """Stage B: fill the intent, now that the full card for one metric is in context."""
+
+    model_config = _FROZEN
+
+    intent: QueryIntent
+    missing_information: tuple[str, ...] = ()
+    """Stage B can still discover a gap the short card did not show -- a caveat that
+    reveals the question cannot be answered as asked. It is not locked into answering
+    just because stage A chose a metric."""
+
+
+def compose(selection: MetricSelection, fill: IntentFill | None) -> AgentDecision:
+    """Fold a two-stage exchange back into the single-stage shape.
+
+    This is what keeps the two prompting strategies comparable: the refusal policy, the
+    compiler and the scorer all consume ``AgentDecision`` and cannot tell which strategy
+    produced it. Only the token cost differs, which is exactly the variable under test.
+    """
+    return AgentDecision(
+        reading=selection.reading,
+        candidates=selection.candidates,
+        intent=fill.intent if fill is not None else None,
+        missing_information=selection.missing_information
+        + (fill.missing_information if fill is not None else ()),
+        proposed_clarification=selection.proposed_clarification,
+    )
