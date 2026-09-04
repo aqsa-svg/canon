@@ -132,6 +132,18 @@ def rows_match(
     if not actual:
         return False
 
+    # FAIRNESS ADJUSTMENT for comparison questions. Canon labels the two periods
+    # 'current' and 'comparison'; gold uses that convention because gold was written
+    # from the metric cards. A system that answers "March vs the month before" with two
+    # month-keyed rows has answered the question correctly and would be marked wrong
+    # purely on a key convention it had no way to know. So for these questions only the
+    # metric column is compared, as a multiset. Found by reading the baseline's actual
+    # SQL rather than its score.
+    if question.expected_comparison and expected:
+        gold_values = tuple((row[-1],) for row in expected)
+        actual_values = tuple((row[-1],) for row in actual)
+        return _rows_equal_multiset(actual_values, gold_values)
+
     gold_width = len(expected[0]) if expected else 0
     actual_width = len(actual[0])
 
