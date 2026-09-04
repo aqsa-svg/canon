@@ -67,14 +67,16 @@ is not helpful; it is scope creep with extra steps.
 ```
 canon/
   semantic/      # canonical metric layer: metrics.yaml is the moat
-    metrics.yaml #   ~20 metric cards. Hand-written. The source of truth.
-    loader.py    #   YAML -> validated MetricCard models -> generated enums
-  compiler/      # QueryIntent -> SQL. Deterministic. No LLM, no network.
+    metrics.yaml #   24 metric cards + join graph + dimensions. The source of truth.
+    enums.py     #   MetricName / DimensionName, GENERATED from the YAML at import
+    cards.py     #   MetricCard, SemanticLayer, and the load-time consistency proof
+    loader.py    #   cached, validated SemanticLayer
+  compiler/      # QueryIntent -> SQL. Deterministic. No LLM, no network, no clock.
     validate.py  #   legality checks; raises InvalidIntent BEFORE any SQL exists
-    build.py     #   SQL construction (joins, grain, fan-out, filter order)
+    plan.py      #   QueryPlan: a validated intent, so the builder decides nothing
+    build.py     #   SQL construction (joins, grain, fan-out, filter order, caveats)
   agent/         # the ONLY place the LLM lives. Fills QueryIntent, nothing else.
-  schemas/       # Pydantic v2 models shared across boundaries: QueryIntent, Answer,
-                 #   MetricCard, InvalidIntent. Depends on nothing else in canon/.
+  schemas/       # boundary models: QueryIntent, Answer, InvalidIntent
 benchmark/
   questions/     # the eval set: questions + gold answers + refusal cases
   harness/       # runs the eval, computes the three metrics + confident-wrong rate
@@ -87,8 +89,18 @@ scripts/         # one-shot operational scripts (data loading)
 app.py           # Streamlit demo
 ```
 
-Dependency direction is one-way: `schemas` <- `semantic` <- `compiler` <- `agent` <- `app`.
-Nothing lower ever imports something higher. `compiler` must not import `agent`.
+Dependency direction is one-way, deepest first:
+
+```
+semantic  ->  schemas  ->  compiler  ->  agent  ->  app
+```
+
+`semantic` is the deepest module and imports nothing from `canon`. This is the opposite
+of where the metric card models would normally live, and the reason is the first core
+idea: `MetricName` is *generated* from `metrics.yaml`, so anything that mentions a metric
+type must sit above the semantic layer. Putting the cards in `schemas` instead would
+force the schema layer to read YAML, which is worse. Nothing lower ever imports something
+higher; `compiler` must never import `agent`.
 
 ---
 

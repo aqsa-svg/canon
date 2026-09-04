@@ -73,7 +73,7 @@ ignore = [
 
 [tool.ruff.lint.flake8-tidy-imports]
 # Enforce the one-way dependency direction from CLAUDE.md:
-# schemas <- semantic <- compiler <- agent <- app
+# semantic -> schemas -> compiler -> agent -> app
 ban-relative-imports = "all"
 
 [tool.ruff.format]

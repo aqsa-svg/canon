@@ -471,7 +471,9 @@ metrics:
     owner: commercial-analytics
 
   - name: avg_freight_per_item
-    description: Mean freight charged on a single line item.
+    description: >-
+      Mean freight charged on a single line item, not per order and not per
+      shipment. A multi-item order is charged freight once per item.
     expression: AVG(order_items.freight_value)
     base: order_items
     grain: one line item within an order
@@ -862,7 +864,10 @@ metrics:
     owner: finance-analytics
 
   - name: payment_count
-    description: Number of payment instrument rows recorded.
+    description: >-
+      Number of payment instrument rows recorded against orders, counting each
+      instrument on a split payment separately. An instrument count, not an
+      order count.
     expression: COUNT(*)
     base: order_payments
     grain: one payment instrument on an order
@@ -914,7 +919,10 @@ metrics:
     owner: cx-analytics
 
   - name: review_count
-    description: Number of reviews submitted.
+    description: >-
+      Count of review rows submitted, one per review. Not the number of reviewed
+      orders: 547 orders carry more than one review, so this exceeds the count of
+      orders that were reviewed.
     expression: COUNT(*)
     base: order_reviews
     grain: one review
@@ -937,7 +945,10 @@ metrics:
     owner: cx-analytics
 
   - name: one_star_review_rate
-    description: Share of reviews scoring 1 out of 5.
+    description: >-
+      Share of reviews scoring 1 out of 5, as a fraction of all reviews in the
+      slice requested. The detractor signal, recomputed per slice rather than
+      taken from a warehouse-wide constant.
     expression: >-
       CAST(SUM(CASE WHEN order_reviews.review_score = 1 THEN 1 ELSE 0 END) AS DOUBLE)
       / NULLIF(COUNT(*), 0)
