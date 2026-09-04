@@ -1,0 +1,995 @@
+# =============================================================================
+# Canon — the canonical metric layer
+# =============================================================================
+#
+# This file is the project's moat. It is the single authoritative statement of what
+# every business term means. Everything downstream is machinery in service of it:
+#
+#   * `metrics` and `dimensions` here generate the Python enums the LLM fills in, so a
+#     metric name that is not in this file is unrepresentable in a QueryIntent -- not
+#     "rejected", not "validated away", but impossible to express.
+#   * `tables` declares the join graph and, critically, the CARDINALITY of each edge.
+#     The compiler traverses only many_to_one edges, which is what makes fan-out a
+#     structural impossibility rather than a bug to be careful about.
+#   * `default_filters` and `caveats` travel with the answer, so a number is never
+#     shown without the definition that produced it.
+#
+# TRUST BOUNDARY. This file is trusted, human-authored input; the LLM's output is not.
+# `expression` is raw SQL because a human wrote and reviewed it, and every compiled
+# query is parsed by sqlglot before execution. Model output never reaches SQL text --
+# it selects names from this file, and values are bound as parameters.
+#
+# The three deliberate traps are marked TRAP and explained where they appear. They
+# exist so the eval in docs/01-evaluation.md measures something real: a system that
+# guesses can score well on a benchmark with no traps in it.
+#
+# Every count cited in a caveat below was measured against data/canon.duckdb after
+# scripts/load_data.py, per the number rule in CLAUDE.md.
+
+version: 1
+
+# -----------------------------------------------------------------------------
+# Ambiguous terms: refusal, encoded as data
+# -----------------------------------------------------------------------------
+# Terms with NO canonical default. When a question rests on one of these and gives
+# nothing else to disambiguate it, the correct answer is a clarifying question naming
+# these candidates. This is what stops refusal from being a matter of model mood: the
+# fork is declared here, in the same file as the definitions.
+#
+# A term is listed here only when a business genuinely has no default. If finance
+# rules that "revenue" means net, that belongs here as a resolution, not a fork.
+ambiguous_terms:
+  - term: revenue
+    candidates: [gross_revenue, net_revenue, reported_revenue]
+    why: >-
+      Three defensible readings that differ materially. Freight is 16-17% of
+      merchandise value in this data, and gross includes canceled orders while net
+      excludes them, so the answers are not close. Finance has not designated a
+      default.
+  - term: sales
+    candidates: [gross_revenue, net_revenue, items_sold]
+    why: >-
+      "Sales" is a money amount to a finance reader and a unit count to an ops
+      reader. Answering the wrong one is not a rounding error.
+  - term: customers
+    candidates: [unique_customers, order_count]
+    why: >-
+      Olist's customer_id is per-order, not per-person: 99,441 customer_id values
+      cover 96,096 customer_unique_id values. "How many customers" therefore means
+      either distinct people or order volume.
+  - term: aov
+    candidates: [avg_order_value, avg_item_price]
+    why: >-
+      Per order or per line item. 727 orders contain items from more than one
+      category, so the two are not interchangeable.
+
+# -----------------------------------------------------------------------------
+# Tables and the join graph
+# -----------------------------------------------------------------------------
+# The join condition key is `join_on`, not `on`: YAML 1.1 parses a bare `on` as the
+# boolean true, which silently turns the condition into an unnamed key. Do not rename it.
+#
+# `cardinality` is relative to the table declaring the edge: many_to_one means many
+# rows of THIS table map to one row of the target, so the join cannot duplicate rows
+# of this table. The compiler traverses many_to_one edges only. A dimension reachable
+# solely through a one_to_many edge is refused with InvalidIntent before any SQL is
+# built, because answering it would require an allocation rule that nobody has written
+# down.
+#
+# Joins are emitted as LEFT JOIN. A metric's denominator must not shrink because a
+# dimension row happens to be missing -- 623 products have no English category
+# translation, and they must show up as a NULL category rather than silently vanish
+# from a revenue total.
+tables:
+  orders:
+    description: One row per order. The spine of the warehouse.
+    primary_key: [order_id]
+    joins:
+      - to: customers
+        join_on: orders.customer_id = customers.customer_id
+        cardinality: many_to_one
+      # orders -> order_items and orders -> order_payments are deliberately absent.
+      # They are one_to_many: 112,650 item rows and 103,886 payment rows sit under
+      # 99,441 orders. Declaring them here would let the compiler build a query that
+      # counts an order more than once.
+
+  order_items:
+    description: >-
+      One row per line item within an order (order_id, order_item_id). The revenue
+      fact table. 112,650 rows over 98,666 orders -- 775 orders have no item rows at
+      all, which is why order-grain and item-grain metrics cannot share a base.
+    primary_key: [order_id, order_item_id]
+    joins:
+      - to: orders
+        join_on: order_items.order_id = orders.order_id
+        cardinality: many_to_one
+      - to: products
+        join_on: order_items.product_id = products.product_id
+        cardinality: many_to_one
+      - to: sellers
+        join_on: order_items.seller_id = sellers.seller_id
+        cardinality: many_to_one
+
+  order_payments:
+    description: >-
+      One row per payment instrument used on an order. 103,886 rows over 99,440
+      orders; 2,961 orders were paid with more than one instrument (split vouchers,
+      mostly). Joining this to order_items inflates merchandise revenue from
+      13,591,643.70 to 14,209,115.34 -- the fan-out this design exists to prevent.
+    primary_key: [order_id, payment_sequential]
+    joins:
+      - to: orders
+        join_on: order_payments.order_id = orders.order_id
+        cardinality: many_to_one
+
+  order_reviews:
+    description: >-
+      One row per review. 99,224 rows over 98,673 orders: 547 orders carry more than
+      one review, and review_id itself repeats 814 times, so it is not a usable
+      primary key despite its name.
+    primary_key: [review_id, order_id]
+    joins:
+      - to: orders
+        join_on: order_reviews.order_id = orders.order_id
+        cardinality: many_to_one
+
+  customers:
+    description: >-
+      One row per customer_id -- which is per-ORDER, not per-person. customer_unique_id
+      is the person. 99,441 customer_id values, 96,096 customer_unique_id values.
+    primary_key: [customer_id]
+    joins: []
+
+  products:
+    description: One row per product. 32,951 rows across 73 categories.
+    primary_key: [product_id]
+    joins:
+      - to: product_category_translation
+        join_on: products.product_category_name = product_category_translation.product_category_name
+        cardinality: many_to_one
+
+  sellers:
+    description: One row per seller. 3,095 rows.
+    primary_key: [seller_id]
+    joins: []
+
+  product_category_translation:
+    description: >-
+      Portuguese to English category names. Covers 71 of the 73 categories present in
+      products, leaving 623 product rows with no English name.
+    primary_key: [product_category_name]
+    joins: []
+
+  geolocation:
+    description: >-
+      Zip-prefix to lat/long lookup, 1,000,163 rows. Loaded for completeness; no
+      canonical metric depends on it, and it is intentionally not reachable in the
+      join graph -- zip prefix is not unique in it, so every join through it fans out.
+    primary_key: [geolocation_zip_code_prefix]
+    joins: []
+
+# -----------------------------------------------------------------------------
+# Dimensions
+# -----------------------------------------------------------------------------
+# Names here become a Python enum. `table` is what the compiler resolves a join path
+# to. A dimension being defined here does NOT make it legal for every metric -- each
+# metric's `valid_dimensions` is the authority on that.
+dimensions:
+  order_status:
+    description: >-
+      Lifecycle state. Values: delivered (96,478), shipped (1,107), canceled (625),
+      unavailable (609), invoiced (314), processing (301), created (5), approved (2).
+    expression: orders.order_status
+    table: orders
+
+  customer_state:
+    description: Two-letter Brazilian state of the customer. 27 distinct values.
+    expression: customers.customer_state
+    table: customers
+
+  customer_city:
+    description: >-
+      Customer city name, as free text. Not normalized in the source -- casing and
+      accents vary, so treat counts by city as approximate.
+    expression: customers.customer_city
+    table: customers
+
+  product_category:
+    description: Product category in Portuguese, as stored. 73 distinct values.
+    expression: products.product_category_name
+    table: products
+
+  product_category_english:
+    description: >-
+      English category name. NULL for 623 product rows whose Portuguese category has
+      no translation row; those rows are kept, not dropped.
+    expression: product_category_translation.product_category_name_english
+    table: product_category_translation
+
+  seller_id:
+    description: Opaque seller identifier. 3,095 sellers.
+    expression: order_items.seller_id
+    table: order_items
+
+  seller_state:
+    description: Two-letter Brazilian state of the seller.
+    expression: sellers.seller_state
+    table: sellers
+
+  payment_type:
+    description: >-
+      Instrument used. Values: credit_card, boleto, voucher, debit_card, and
+      not_defined (3 rows, all with payment_value 0.00).
+    expression: order_payments.payment_type
+    table: order_payments
+
+  review_score:
+    description: Customer rating, 1 to 5.
+    expression: order_reviews.review_score
+    table: order_reviews
+
+# -----------------------------------------------------------------------------
+# Metrics
+# -----------------------------------------------------------------------------
+# Fields, all required:
+#   name              identifier; becomes an enum member
+#   description       what it means in business terms, precisely enough to arbitrate
+#   expression        SQL aggregate, valid at `base`'s grain, using table.column names
+#   base              the fact table the aggregate runs over. Determines the grain and
+#                     therefore which dimensions are reachable without fan-out.
+#   grain             prose statement of what one row of `base` is. For humans.
+#   time_column       the timestamp this metric is bucketed and filtered by. Stated per
+#                     metric because "revenue in March" and "deliveries in March" are
+#                     different questions.
+#   valid_dimensions  the ONLY legal dimensions. Human judgment, and deliberately
+#                     narrower than the join graph allows in places -- see avg_order_value.
+#   default_filters   applied unless the question overrides them. Typed, not SQL.
+#   caveats           travel with every answer using this metric.
+#   synonyms          phrasings that map here. A phrase that is ambiguous belongs in
+#                     ambiguous_terms above, NOT as a synonym of one candidate.
+#   owner             team accountable for the definition.
+metrics:
+
+  # === Revenue family ========================================================
+  # TRAP 1 of 3: gross_revenue and net_revenue.
+  # Similar names, different meaning, and they differ along TWO axes at once --
+  # freight inclusion and order-status filtering. For 2018: gross is 7,386,050.80 of
+  # merchandise plus 1,257,646.80 of freight, while net is 7,341,182.41. A system that
+  # picks the wrong one is not slightly off, and the bare word "revenue" is registered
+  # in ambiguous_terms precisely so that guessing between them is scored a failure.
+
+  - name: gross_revenue
+    description: >-
+      Total amount invoiced to customers, merchandise plus freight, across every order
+      regardless of its final status. The top-line figure: what was billed, not what
+      was kept.
+    expression: SUM(order_items.price + order_items.freight_value)
+    base: order_items
+    grain: one line item within an order
+    time_column: orders.order_purchase_timestamp
+    valid_dimensions:
+      - order_status
+      - customer_state
+      - customer_city
+      - product_category
+      - product_category_english
+      - seller_id
+      - seller_state
+    default_filters: []
+    caveats:
+      - Includes canceled and unavailable orders. 542 item rows belong to canceled
+        orders and 7 to unavailable ones, so this figure overstates money actually
+        collected.
+      - Includes freight. Freight is 16.03% of merchandise value in 2017 and 17.03% in
+        2018, so gross and net revenue are not interchangeable at any grain.
+      - Excludes the 775 orders that have no line items; they contribute payment rows
+        but no merchandise.
+    synonyms:
+      - gross revenue
+      - gross sales
+      - total billed
+      - top line
+      - invoiced amount
+    owner: finance-analytics
+
+  - name: net_revenue
+    description: >-
+      Merchandise revenue only -- freight excluded -- for orders that were not canceled
+      or unavailable. The figure finance recognises.
+    expression: SUM(order_items.price)
+    base: order_items
+    grain: one line item within an order
+    time_column: orders.order_purchase_timestamp
+    valid_dimensions:
+      - order_status
+      - customer_state
+      - customer_city
+      - product_category
+      - product_category_english
+      - seller_id
+      - seller_state
+    default_filters:
+      - column: orders.order_status
+        op: not_in
+        values: [canceled, unavailable]
+    caveats:
+      - Excludes freight entirely. Do not reconcile against gross_revenue without
+        adding freight_revenue back.
+      - Excludes canceled and unavailable orders by default. Orders still in flight
+        (shipped, invoiced, processing) ARE included, so this is not delivered revenue.
+      - Not comparable to total_payment_value; see that metric's caveats.
+    synonyms:
+      - net revenue
+      - net sales
+      - merchandise revenue
+      - product revenue
+      - revenue excluding shipping
+    owner: finance-analytics
+
+  - name: freight_revenue
+    description: Shipping charges billed to customers, independent of merchandise value.
+    expression: SUM(order_items.freight_value)
+    base: order_items
+    grain: one line item within an order
+    time_column: orders.order_purchase_timestamp
+    valid_dimensions:
+      - order_status
+      - customer_state
+      - customer_city
+      - product_category
+      - product_category_english
+      - seller_id
+      - seller_state
+    default_filters:
+      - column: orders.order_status
+        op: not_in
+        values: [canceled, unavailable]
+    caveats:
+      - Freight is billed per line item, so a multi-item order carries multiple freight
+        charges. 383 item rows carry zero freight.
+      - This is revenue billed for shipping, not shipping cost incurred. The warehouse
+        holds no carrier cost data, so shipping margin cannot be computed.
+    synonyms:
+      - freight revenue
+      - shipping revenue
+      - shipping charges
+      - delivery fees
+    owner: finance-analytics
+
+  # TRAP 2 of 3: a definition that changes partway through the data.
+  # `definition_change` is a real structural feature, not a comment: the compiler emits
+  # the CASE expression AND, when the requested time range spans the boundary date,
+  # attaches a from_compiler caveat. A single number covering both regimes is a sum of
+  # two different definitions, and the answer has to say so.
+  #
+  # HONEST NOTE: this policy change is introduced for evaluation purposes. The
+  # underlying Olist data has no such restatement. It is here because definitional
+  # discontinuity is the most common way real metric layers mislead people, and a
+  # benchmark without one measures an easier problem than the real job.
+  - name: reported_revenue
+    description: >-
+      Revenue as reported in the monthly finance pack, under the treatment in force at
+      the time. Before 2018-01-01 freight was booked as revenue; from 2018-01-01
+      onward freight is booked as a recovery against shipping cost and excluded. Prior
+      periods were never restated, so the historical series mixes both treatments --
+      which is exactly how it appears in the finance pack.
+    expression: >-
+      SUM(CASE WHEN orders.order_purchase_timestamp < TIMESTAMP '2018-01-01'
+               THEN order_items.price + order_items.freight_value
+               ELSE order_items.price END)
+    base: order_items
+    grain: one line item within an order
+    time_column: orders.order_purchase_timestamp
+    definition_change:
+      effective_date: '2018-01-01'
+      before: merchandise plus freight
+      after: merchandise only
+      caveat: >-
+        This range spans the 2018-01-01 freight restatement. Figures before that date
+        include freight as revenue; figures from it onward exclude freight. A single
+        total across the boundary adds two different definitions together, and
+        period-over-period growth through it is overstated by the freight that was
+        removed from the definition. Use gross_revenue or net_revenue for a series
+        with one consistent treatment.
+    valid_dimensions:
+      - order_status
+      - customer_state
+      - customer_city
+      - product_category
+      - product_category_english
+      - seller_state
+    default_filters:
+      - column: orders.order_status
+        op: not_in
+        values: [canceled, unavailable]
+    caveats:
+      - The definition changes on 2018-01-01 and prior periods were not restated. Never
+        quote a growth rate spanning that date from this metric.
+      - Use this metric only to reproduce a historical finance pack. For any analysis
+        needing one consistent treatment, use net_revenue or gross_revenue.
+    synonyms:
+      - reported revenue
+      - revenue as reported
+      - finance pack revenue
+      - book revenue
+    owner: finance-controller
+
+  - name: items_sold
+    description: Count of line items, i.e. units sold, one row per item on an order.
+    expression: COUNT(*)
+    base: order_items
+    grain: one line item within an order
+    time_column: orders.order_purchase_timestamp
+    valid_dimensions:
+      - order_status
+      - customer_state
+      - customer_city
+      - product_category
+      - product_category_english
+      - seller_id
+      - seller_state
+    default_filters:
+      - column: orders.order_status
+        op: not_in
+        values: [canceled, unavailable]
+    caveats:
+      - One row is one unit of one product. An order of three identical products is
+        three rows, so this is a unit count and not an order count.
+    synonyms:
+      - items sold
+      - units sold
+      - quantity sold
+      - line items
+    owner: commercial-analytics
+
+  - name: avg_item_price
+    description: Mean merchandise price of a single line item, freight excluded.
+    expression: AVG(order_items.price)
+    base: order_items
+    grain: one line item within an order
+    time_column: orders.order_purchase_timestamp
+    valid_dimensions:
+      - order_status
+      - customer_state
+      - customer_city
+      - product_category
+      - product_category_english
+      - seller_id
+      - seller_state
+    default_filters:
+      - column: orders.order_status
+        op: not_in
+        values: [canceled, unavailable]
+    caveats:
+      - Averaged over line items, not orders. This is not average order value; see
+        avg_order_value.
+    synonyms:
+      - average item price
+      - average unit price
+      - mean item price
+      - average price per item
+    owner: commercial-analytics
+
+  - name: avg_freight_per_item
+    description: Mean freight charged on a single line item.
+    expression: AVG(order_items.freight_value)
+    base: order_items
+    grain: one line item within an order
+    time_column: orders.order_purchase_timestamp
+    valid_dimensions:
+      - order_status
+      - customer_state
+      - customer_city
+      - product_category
+      - product_category_english
+      - seller_id
+      - seller_state
+    default_filters:
+      - column: orders.order_status
+        op: not_in
+        values: [canceled, unavailable]
+    caveats:
+      - Per line item, not per order or per shipment. A multi-item order is charged
+        freight more than once.
+      - 383 item rows carry zero freight and are included in the denominator.
+    synonyms:
+      - average freight
+      - average shipping cost per item
+      - mean freight value
+    owner: logistics-analytics
+
+  # TRAP 3 of 3: valid_dimensions that deliberately excludes a plausible dimension.
+  # avg_order_value can be sliced by product_category as far as the join graph is
+  # concerned -- order_items -> products is many_to_one, so nothing fans out and the
+  # SQL would run and return numbers. It is excluded anyway, because an order can
+  # contain items from several categories (727 orders do), so an order's value cannot
+  # be attributed to one category without an allocation rule nobody has written down.
+  # "Average order value by category" would return plausible, quotable, wrong numbers.
+  #
+  # This is why the two protections are not redundant: the join graph proves a query
+  # is structurally safe, and valid_dimensions encodes the semantic judgment the graph
+  # cannot see.
+  - name: avg_order_value
+    description: >-
+      Mean merchandise value of an order: net revenue divided by the number of distinct
+      orders contributing it. Freight excluded.
+    expression: SUM(order_items.price) / COUNT(DISTINCT order_items.order_id)
+    base: order_items
+    grain: one line item within an order, aggregated up to distinct orders
+    time_column: orders.order_purchase_timestamp
+    valid_dimensions:
+      - order_status
+      - customer_state
+      - customer_city
+    default_filters:
+      - column: orders.order_status
+        op: not_in
+        values: [canceled, unavailable]
+    caveats:
+      - Freight excluded, matching net_revenue. An order's total charge is higher.
+      - Not available by product category or seller. 727 orders contain items from more
+        than one category and 1,278 from more than one seller, so attributing a whole
+        order's value to one category or seller would double count it. Ask for
+        avg_item_price by category instead, which is well defined at item grain.
+      - The 775 orders with no line items are absent from the denominator.
+    synonyms:
+      - average order value
+      - aov per order
+      - mean order value
+      - basket size
+    owner: commercial-analytics
+
+  # === Order family ==========================================================
+  - name: order_count
+    description: >-
+      Number of distinct orders placed, at every lifecycle state including canceled.
+      The volume measure.
+    expression: COUNT(DISTINCT orders.order_id)
+    base: orders
+    grain: one order
+    time_column: orders.order_purchase_timestamp
+    valid_dimensions:
+      - order_status
+      - customer_state
+      - customer_city
+    default_filters: []
+    caveats:
+      - Counts every status, canceled included. For orders that actually completed, use
+        delivered_order_count.
+      - Not available by product category, seller, or payment type. Those live one
+        one_to_many join away from an order, and reaching them would count a
+        multi-item, multi-seller, or split-payment order more than once.
+    synonyms:
+      - order count
+      - number of orders
+      - orders placed
+      - order volume
+      - how many orders
+    owner: commercial-analytics
+
+  - name: delivered_order_count
+    description: Number of distinct orders that reached the customer.
+    expression: COUNT(DISTINCT orders.order_id)
+    base: orders
+    grain: one order
+    time_column: orders.order_purchase_timestamp
+    valid_dimensions:
+      - customer_state
+      - customer_city
+    default_filters:
+      - column: orders.order_status
+        op: eq
+        values: [delivered]
+    caveats:
+      - Bucketed by purchase date, not delivery date, so a month's figure counts orders
+        bought then and delivered later.
+      - 8 delivered orders have no delivery timestamp; they are counted here but
+        excluded from avg_delivery_days.
+    synonyms:
+      - delivered orders
+      - completed orders
+      - fulfilled orders
+      - successful deliveries
+    owner: logistics-analytics
+
+  - name: canceled_order_count
+    description: Number of distinct orders whose final status is canceled.
+    expression: COUNT(DISTINCT orders.order_id)
+    base: orders
+    grain: one order
+    time_column: orders.order_purchase_timestamp
+    valid_dimensions:
+      - customer_state
+      - customer_city
+    default_filters:
+      - column: orders.order_status
+        op: eq
+        values: [canceled]
+    caveats:
+      - Counts only status 'canceled'. The 609 'unavailable' orders also never reached
+        a customer but are counted separately, being a stock-out rather than a
+        cancellation.
+    synonyms:
+      - canceled orders
+      - cancellations
+      - number of cancellations
+    owner: commercial-analytics
+
+  - name: cancellation_rate
+    description: >-
+      Share of orders whose final status is canceled, as a fraction of all orders
+      placed.
+    expression: >-
+      CAST(COUNT(DISTINCT CASE WHEN orders.order_status = 'canceled'
+                               THEN orders.order_id END) AS DOUBLE)
+      / NULLIF(COUNT(DISTINCT orders.order_id), 0)
+    base: orders
+    grain: one order
+    time_column: orders.order_purchase_timestamp
+    valid_dimensions:
+      - customer_state
+      - customer_city
+    default_filters: []
+    caveats:
+      - Denominator is all orders at any status. 'unavailable' orders are in the
+        denominator but not the numerator.
+      - A fraction between 0 and 1, not a percentage.
+      - Bucketed by purchase date. An order bought in one month and canceled in the
+        next counts against the month it was bought.
+    synonyms:
+      - cancellation rate
+      - cancel rate
+      - share of orders canceled
+      - percent canceled
+    owner: commercial-analytics
+
+  - name: avg_delivery_days
+    description: >-
+      Mean calendar days from order purchase to customer delivery, over delivered
+      orders that have a delivery timestamp.
+    expression: >-
+      AVG(date_diff('day', orders.order_purchase_timestamp,
+                    orders.order_delivered_customer_date))
+    base: orders
+    grain: one order
+    time_column: orders.order_purchase_timestamp
+    valid_dimensions:
+      - customer_state
+      - customer_city
+    default_filters:
+      - column: orders.order_status
+        op: eq
+        values: [delivered]
+      - column: orders.order_delivered_customer_date
+        op: is_not_null
+        values: []
+    caveats:
+      - Covers 96,470 of the 96,478 delivered orders; 8 have no delivery timestamp and
+        are excluded.
+      - Calendar days including weekends and holidays, measured from purchase rather
+        than from dispatch, so it includes approval and handling time.
+      - Bucketed by purchase date. Orders bought near the end of the data window may
+        not have been delivered before the data ends, biasing recent months downward.
+    synonyms:
+      - average delivery time
+      - delivery days
+      - how long delivery takes
+      - mean shipping time
+      - average time to deliver
+    owner: logistics-analytics
+
+  - name: late_delivery_rate
+    description: >-
+      Share of delivered orders that arrived after the estimated delivery date given to
+      the customer.
+    expression: >-
+      CAST(SUM(CASE WHEN orders.order_delivered_customer_date
+                         > orders.order_estimated_delivery_date
+                    THEN 1 ELSE 0 END) AS DOUBLE)
+      / NULLIF(COUNT(*), 0)
+    base: orders
+    grain: one order
+    time_column: orders.order_purchase_timestamp
+    valid_dimensions:
+      - customer_state
+      - customer_city
+    default_filters:
+      - column: orders.order_status
+        op: eq
+        values: [delivered]
+      - column: orders.order_delivered_customer_date
+        op: is_not_null
+        values: []
+    caveats:
+      - Late against the estimate shown to the customer, which is itself padded, not
+        against a contractual SLA.
+      - Compares dates at timestamp precision; an order delivered later the same day as
+        the estimate counts as late.
+      - A fraction between 0 and 1, not a percentage.
+    synonyms:
+      - late delivery rate
+      - late rate
+      - share delivered late
+      - delivery delay rate
+    owner: logistics-analytics
+
+  - name: on_time_delivery_rate
+      # Deliberately its own metric rather than 1 - late_delivery_rate: an
+      # on-time-or-early delivery is the affirmative measure ops is held to, and
+      # keeping both means neither has to be derived at read time.
+    description: >-
+      Share of delivered orders that arrived on or before the estimated delivery date.
+    expression: >-
+      CAST(SUM(CASE WHEN orders.order_delivered_customer_date
+                         <= orders.order_estimated_delivery_date
+                    THEN 1 ELSE 0 END) AS DOUBLE)
+      / NULLIF(COUNT(*), 0)
+    base: orders
+    grain: one order
+    time_column: orders.order_purchase_timestamp
+    valid_dimensions:
+      - customer_state
+      - customer_city
+    default_filters:
+      - column: orders.order_status
+        op: eq
+        values: [delivered]
+      - column: orders.order_delivered_customer_date
+        op: is_not_null
+        values: []
+    caveats:
+      - The complement of late_delivery_rate over the same population; the two sum to 1
+        only within identical filters.
+      - Measured against the customer-facing estimate, not a contractual SLA.
+      - A fraction between 0 and 1, not a percentage.
+    synonyms:
+      - on time delivery rate
+      - on-time rate
+      - share delivered on time
+      - delivery reliability
+    owner: logistics-analytics
+
+  # === Customer family =======================================================
+  - name: unique_customers
+    description: >-
+      Number of distinct people who ordered, counted on customer_unique_id. The obvious
+      column, customer_id, is issued per order and would overcount.
+    expression: COUNT(DISTINCT customers.customer_unique_id)
+    base: orders
+    grain: one order, counted distinct by person
+    time_column: orders.order_purchase_timestamp
+    valid_dimensions:
+      - customer_state
+      - customer_city
+      - order_status
+    default_filters: []
+    caveats:
+      - Counted on customer_unique_id. Across the whole warehouse that is 96,096
+        people against 99,441 customer_id values, so counting customer_id would
+        overstate by 3,345.
+      - Not additive across time buckets. A person who ordered in two months is counted
+        in each, so monthly figures do not sum to the annual figure.
+      - Not additive across states either, for the same reason.
+    synonyms:
+      - unique customers
+      - distinct customers
+      - number of people who ordered
+      - customer count
+      - how many distinct customers
+    owner: growth-analytics
+
+  - name: orders_per_customer
+    description: >-
+      Mean number of orders per distinct person, over the period and slice requested.
+    expression: >-
+      CAST(COUNT(DISTINCT orders.order_id) AS DOUBLE)
+      / NULLIF(COUNT(DISTINCT customers.customer_unique_id), 0)
+    base: orders
+    grain: one order, divided by distinct people
+    time_column: orders.order_purchase_timestamp
+    valid_dimensions:
+      - customer_state
+      - customer_city
+    default_filters: []
+    caveats:
+      - Both parts are computed within the requested window, so a shorter window pushes
+        this toward 1.0 by construction. Only comparable across equal-length periods.
+      - Olist is a marketplace with little repeat purchasing; expect a value close to
+        1. This is a repeat-rate proxy, not a cohort retention measure.
+    synonyms:
+      - orders per customer
+      - average orders per customer
+      - repeat purchase proxy
+      - purchase frequency
+    owner: growth-analytics
+
+  # === Payment family ========================================================
+  - name: total_payment_value
+    description: >-
+      Total value of payment instruments recorded against orders, including installment
+      charges and voucher redemptions.
+    expression: SUM(order_payments.payment_value)
+    base: order_payments
+    grain: one payment instrument on an order
+    time_column: orders.order_purchase_timestamp
+    valid_dimensions:
+      - payment_type
+      - order_status
+      - customer_state
+      - customer_city
+    default_filters: []
+    caveats:
+      - Does NOT reconcile to gross_revenue. Payments total 16,008,872.12 against
+        15,843,553.24 of merchandise plus freight -- installment charges, vouchers, and
+        the 775 orders with payments but no line items all sit in the gap. Neither
+        figure is wrong; they measure different things.
+      - >-
+        Not available by product category or seller: payments attach to an order, not
+        to a line item, and splitting one across categories has no defined rule.
+      - Includes 3 rows of payment_type 'not_defined', all with value 0.00.
+    synonyms:
+      - total payments
+      - payment value
+      - amount paid
+      - cash collected
+    owner: finance-analytics
+
+  - name: avg_installments
+    description: >-
+      Mean number of installments elected across payment instruments, at instrument
+      grain.
+    expression: AVG(order_payments.payment_installments)
+    base: order_payments
+    grain: one payment instrument on an order
+    time_column: orders.order_purchase_timestamp
+    valid_dimensions:
+      - payment_type
+      - order_status
+      - customer_state
+      - customer_city
+    default_filters: []
+    caveats:
+      - Averaged over instruments, not orders. The 2,961 split-payment orders
+        contribute more than once.
+      - Instruments that cannot be installed (boleto, voucher, debit_card) record 1 and
+        are included, which pulls the average toward 1. Filter to credit_card for the
+        credit story.
+    synonyms:
+      - average installments
+      - mean installments
+      - installment count
+      - how many installments
+    owner: finance-analytics
+
+  - name: payment_count
+    description: Number of payment instrument rows recorded.
+    expression: COUNT(*)
+    base: order_payments
+    grain: one payment instrument on an order
+    time_column: orders.order_purchase_timestamp
+    valid_dimensions:
+      - payment_type
+      - order_status
+      - customer_state
+      - customer_city
+    default_filters: []
+    caveats:
+      - Counts instruments, not orders. 103,886 instruments cover 99,440 orders, so
+        this exceeds order_count by design.
+    synonyms:
+      - payment count
+      - number of payments
+      - payment transactions
+    owner: finance-analytics
+
+  # === Review family =========================================================
+  - name: avg_review_score
+    description: Mean customer rating from 1 to 5, at review grain.
+    expression: AVG(order_reviews.review_score)
+    base: order_reviews
+    grain: one review
+    time_column: order_reviews.review_creation_date
+    valid_dimensions:
+      - review_score
+      - order_status
+      - customer_state
+      - customer_city
+    default_filters: []
+    caveats:
+      - Averaged over reviews, not orders. 547 orders carry more than one review and
+        contribute more than once.
+      - Bucketed by review creation date, not order purchase date. A review of a
+        December order written in January falls in January.
+      - Covers the 98,673 orders that were reviewed, out of 99,441. Unreviewed orders
+        are absent, not zero.
+      - >-
+        Not available by product category: a review attaches to an order, which may
+        span categories.
+    synonyms:
+      - average review score
+      - average rating
+      - mean review score
+      - customer satisfaction score
+      - csat
+    owner: cx-analytics
+
+  - name: review_count
+    description: Number of reviews submitted.
+    expression: COUNT(*)
+    base: order_reviews
+    grain: one review
+    time_column: order_reviews.review_creation_date
+    valid_dimensions:
+      - review_score
+      - order_status
+      - customer_state
+      - customer_city
+    default_filters: []
+    caveats:
+      - Counts review rows, not reviewed orders. review_id repeats 814 times in the
+        source, so it cannot be used to deduplicate.
+      - Bucketed by review creation date, not order purchase date.
+    synonyms:
+      - review count
+      - number of reviews
+      - how many reviews
+      - reviews submitted
+    owner: cx-analytics
+
+  - name: one_star_review_rate
+    description: Share of reviews scoring 1 out of 5.
+    expression: >-
+      CAST(SUM(CASE WHEN order_reviews.review_score = 1 THEN 1 ELSE 0 END) AS DOUBLE)
+      / NULLIF(COUNT(*), 0)
+    base: order_reviews
+    grain: one review
+    time_column: order_reviews.review_creation_date
+    valid_dimensions:
+      - order_status
+      - customer_state
+      - customer_city
+    default_filters: []
+    caveats:
+      - 1-star reviews are 11,424 of 99,224 across the whole warehouse; this metric
+        recomputes the share within whatever slice is requested.
+      - A fraction between 0 and 1, not a percentage.
+      - Do not slice this by review_score. It would return 1 for the 1-star bucket and
+        0 for the rest, which is arithmetic rather than insight.
+    synonyms:
+      - one star rate
+      - share of 1 star reviews
+      - bad review rate
+      - detractor rate
+    owner: cx-analytics
+
+  # === Marketplace supply ====================================================
+  - name: active_sellers
+    description: >-
+      Number of distinct sellers with at least one line item in the period and slice
+      requested.
+    expression: COUNT(DISTINCT order_items.seller_id)
+    base: order_items
+    grain: one line item within an order, counted distinct by seller
+    time_column: orders.order_purchase_timestamp
+    valid_dimensions:
+      - order_status
+      - product_category
+      - product_category_english
+      - seller_state
+      - customer_state
+    default_filters:
+      - column: orders.order_status
+        op: not_in
+        values: [canceled, unavailable]
+    caveats:
+      - >-
+        "Active" means sold at least one item in the window, not registered. 3,095
+        sellers exist in total.
+      - Not additive across time buckets or categories; a seller active in two months
+        or two categories is counted in each.
+    synonyms:
+      - active sellers
+      - selling sellers
+      - number of sellers
+      - how many sellers sold
+    owner: marketplace-analytics

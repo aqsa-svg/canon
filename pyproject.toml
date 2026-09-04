@@ -66,6 +66,10 @@ ignore = [
 # Tests may use magic numbers and skip return annotations.
 "tests/**" = ["ANN201", "ANN001", "PLR2004"]
 "scripts/**" = ["T201"]  # scripts print; that is their interface
+# InvalidIntent is a named part of this project's contract (see CLAUDE.md and
+# docs/01-evaluation.md); renaming it to InvalidIntentError to satisfy N818 would
+# make the code disagree with the design docs. Scoped to this one file.
+"canon/schemas/errors.py" = ["N818"]
 
 [tool.ruff.lint.flake8-tidy-imports]
 # Enforce the one-way dependency direction from CLAUDE.md:
