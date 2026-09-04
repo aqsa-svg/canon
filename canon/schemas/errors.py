@@ -40,6 +40,10 @@ class InvalidIntentReason(StrEnum):
     SORT_TARGET_MISSING = "sort_target_missing"
     """Sorting by something the query does not select."""
 
+    OVERLAPPING_COMPARISON = "overlapping_comparison"
+    """The comparison range overlaps the range it is compared against, so a row would
+    belong to both periods and the label would be a coin flip."""
+
 
 class InvalidIntentDetail(BaseModel):
     """The serialisable payload of an ``InvalidIntent``."""

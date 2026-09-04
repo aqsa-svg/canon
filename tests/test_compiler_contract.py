@@ -7,6 +7,8 @@ never become syntax.
 
 from __future__ import annotations
 
+from datetime import date
+
 import pytest
 import sqlglot
 from sqlglot import exp
@@ -14,9 +16,16 @@ from sqlglot import exp
 from canon.compiler import compile_intent, validate_intent
 from canon.schemas.answer import Answer, AnswerValue, ResultColumn
 from canon.schemas.errors import InvalidIntent, InvalidIntentReason
-from canon.schemas.intent import IntentFilter, QueryIntent, SortSpec, TimeRange
+from canon.schemas.intent import (
+    Comparison,
+    IntentFilter,
+    QueryIntent,
+    SortSpec,
+    TimeRange,
+)
 from canon.semantic.cards import SemanticLayer
 from canon.semantic.enums import (
+    ComparisonKind,
     DimensionName,
     FilterOp,
     MetricName,
@@ -386,3 +395,120 @@ class TestAnswerExclusivity:
         compiled = compile_intent(QueryIntent(metric=MetricName.NET_REVENUE), layer)
         with pytest.raises(ValueError, match="an answer needs"):
             Answer(sql=compiled.sql, metric_definition_used=compiled.metric, confidence=0.9)
+
+
+class TestComparison:
+    """Period-over-period, with the second range derived rather than supplied."""
+
+    def test_previous_period_is_calendar_aware(self) -> None:
+        """March compared to the previous period is February, not "the last 31 days".
+
+        A day-count shift would start the comparison window on 29 January and report a
+        number nobody asked for.
+        """
+        march = TimeRange(start="2018-03-01", end="2018-04-01")
+        derived = Comparison(kind=ComparisonKind.PREVIOUS_PERIOD).derive(march)
+        assert (derived.start, derived.end) == (date(2018, 2, 1), date(2018, 3, 1))
+
+    def test_quarter_over_quarter_shifts_three_months(self) -> None:
+        q1 = TimeRange(start="2018-01-01", end="2018-04-01")
+        derived = Comparison(kind=ComparisonKind.PREVIOUS_PERIOD).derive(q1)
+        assert (derived.start, derived.end) == (date(2017, 10, 1), date(2018, 1, 1))
+
+    def test_an_unaligned_window_shifts_by_its_own_length(self) -> None:
+        week = TimeRange(start="2018-03-08", end="2018-03-15")
+        derived = Comparison(kind=ComparisonKind.PREVIOUS_PERIOD).derive(week)
+        assert (derived.start, derived.end) == (date(2018, 3, 1), date(2018, 3, 8))
+
+    def test_leap_day_clamps_rather_than_raising(self) -> None:
+        leap = TimeRange(start="2016-02-29", end="2016-03-01")
+        derived = Comparison(kind=ComparisonKind.PREVIOUS_YEAR).derive(leap)
+        assert derived.start == date(2015, 2, 28)
+
+    def test_a_comparison_without_an_anchor_cannot_be_constructed(self) -> None:
+        """ "Compared to the previous period" is meaningless with no period."""
+        with pytest.raises(ValueError, match="bounded time_range"):
+            QueryIntent(
+                metric=MetricName.NET_REVENUE,
+                comparison=Comparison(kind=ComparisonKind.PREVIOUS_PERIOD),
+            )
+
+    def test_both_periods_land_in_one_query_with_a_label(self, layer: SemanticLayer) -> None:
+        compiled = compile_intent(
+            QueryIntent(
+                metric=MetricName.NET_REVENUE,
+                time_range=TimeRange(start="2018-03-01", end="2018-04-01"),
+                comparison=Comparison(kind=ComparisonKind.PREVIOUS_PERIOD),
+            ),
+            layer,
+        )
+        assert compiled.columns == ("comparison_period", "net_revenue")
+        # One query, not two: two queries would be two chances to filter differently.
+        assert len(sqlglot.parse(compiled.sql, dialect="duckdb")) == 1
+        assert compiled.sql.count("SELECT") == 1
+
+    def test_the_metric_is_recomputed_per_period_not_differenced(
+        self, layer: SemanticLayer
+    ) -> None:
+        """A ratio metric must be evaluated inside each period.
+
+        Differencing two ratios' components would give the ratio of differences, which
+        is a different and wrong number. Grouping by the period label sidesteps it
+        entirely: the card's expression runs unchanged, once per period.
+        """
+        compiled = compile_intent(
+            QueryIntent(
+                metric=MetricName.CANCELLATION_RATE,
+                time_range=TimeRange(start="2018-01-01", end="2018-04-01"),
+                comparison=Comparison(kind=ComparisonKind.PREVIOUS_YEAR),
+            ),
+            layer,
+        )
+        assert (
+            compiled.metric.expression in compiled.sql.replace("\n  ", " ").replace("\n", " ")
+            or "NULLIF" in compiled.sql
+        )
+
+    def test_overlapping_comparison_is_refused(self, layer: SemanticLayer) -> None:
+        """A range longer than a year cannot be compared year-over-year.
+
+        The windows would overlap, and a row in the overlap belongs to both periods, so
+        the label would be arbitrary.
+        """
+        with pytest.raises(InvalidIntent) as raised:
+            compile_intent(
+                QueryIntent(
+                    metric=MetricName.NET_REVENUE,
+                    time_range=TimeRange(start="2017-01-01", end="2018-06-01"),
+                    comparison=Comparison(kind=ComparisonKind.PREVIOUS_YEAR),
+                ),
+                layer,
+            )
+        assert raised.value.detail.reason is InvalidIntentReason.OVERLAPPING_COMPARISON
+
+    def test_a_limit_with_a_comparison_is_refused(self, layer: SemanticLayer) -> None:
+        """A limit truncates whole periods, leaving a half-result that looks whole."""
+        with pytest.raises(InvalidIntent) as raised:
+            compile_intent(
+                QueryIntent(
+                    metric=MetricName.ORDER_COUNT,
+                    dimensions=(DimensionName.CUSTOMER_STATE,),
+                    time_range=TimeRange(start="2018-01-01", end="2018-04-01"),
+                    comparison=Comparison(kind=ComparisonKind.PREVIOUS_YEAR),
+                    limit=5,
+                ),
+                layer,
+            )
+        assert raised.value.detail.reason is InvalidIntentReason.BAD_LIMIT
+
+    def test_a_comparison_discloses_both_windows(self, layer: SemanticLayer) -> None:
+        compiled = compile_intent(
+            QueryIntent(
+                metric=MetricName.NET_REVENUE,
+                time_range=TimeRange(start="2018-03-01", end="2018-04-01"),
+                comparison=Comparison(kind=ComparisonKind.PREVIOUS_PERIOD),
+            ),
+            layer,
+        )
+        text = " ".join(caveat.text for caveat in compiled.caveats)
+        assert "2018-02-01" in text and "2018-03-01" in text

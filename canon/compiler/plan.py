@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from pydantic import BaseModel, ConfigDict
 
-from canon.schemas.intent import QueryIntent
+from canon.schemas.intent import QueryIntent, TimeRange
 from canon.semantic.cards import (
     DimensionCard,
     JoinEdge,
@@ -26,6 +26,12 @@ _FROZEN = ConfigDict(frozen=True, extra="forbid")
 
 PERIOD_ALIAS = "period"
 """Output column name for the time bucket. Fixed so charts and tests can rely on it."""
+
+COMPARISON_ALIAS = "comparison_period"
+"""Output column labelling which period a comparison row belongs to."""
+
+CURRENT_LABEL = "current"
+COMPARISON_LABEL = "comparison"
 
 
 class ResolvedFilter(BaseModel):
@@ -74,6 +80,15 @@ class QueryPlan(BaseModel):
 
     needs_time_column: bool
     """Whether the time column is used, for bucketing or for filtering."""
+
+    comparison_range: TimeRange | None = None
+    """The derived earlier range, computed by the compiler rather than the model.
+
+    Present iff the intent asked for a comparison. Both ranges go into one query with a
+    label column, so the metric expression is evaluated per period unchanged -- which is
+    the only approach that stays correct for ratio metrics, where a difference of sums
+    is not the difference of the ratios.
+    """
 
     @property
     def metric_alias(self) -> str:

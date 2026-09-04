@@ -25,11 +25,18 @@ import sqlglot
 from pydantic import BaseModel, ConfigDict
 from sqlglot import exp
 
-from canon.compiler.plan import PERIOD_ALIAS, QueryPlan, ResolvedFilter
+from canon.compiler.plan import (
+    COMPARISON_ALIAS,
+    COMPARISON_LABEL,
+    CURRENT_LABEL,
+    PERIOD_ALIAS,
+    QueryPlan,
+    ResolvedFilter,
+)
 from canon.compiler.validate import validate_intent
 from canon.schemas.answer import Caveat, ChartKind, ChartSpec
 from canon.schemas.errors import CompilerBug
-from canon.schemas.intent import QueryIntent
+from canon.schemas.intent import QueryIntent, TimeRange
 from canon.semantic.cards import MetricCard, SemanticLayer
 from canon.semantic.enums import CaveatSource, FilterOp, SortDirection, SortTarget
 from canon.semantic.loader import load_semantic_layer
@@ -114,13 +121,40 @@ def _time_conditions(plan: QueryPlan) -> list[exp.Expression]:
     if time_range is None:
         return []
 
+    if plan.comparison_range is not None:
+        # Both windows in one predicate. Two separate queries would be two chances to
+        # apply the filters differently; one query cannot drift from itself.
+        return [
+            exp.Paren(
+                this=exp.Or(
+                    this=exp.Paren(this=_window(plan, plan.comparison_range)),
+                    expression=exp.Paren(this=_window(plan, time_range)),
+                )
+            )
+        ]
+
+    return _window_parts(plan, time_range)
+
+
+def _window_parts(plan: QueryPlan, window: TimeRange) -> list[exp.Expression]:
     column = _parse(plan.metric.time_column)
     conditions: list[exp.Expression] = []
-    if time_range.start is not None:
-        conditions.append(exp.GTE(this=column, expression=_date_literal(time_range.start)))
-    if time_range.end is not None:
-        conditions.append(exp.LT(this=column.copy(), expression=_date_literal(time_range.end)))
+    if window.start is not None:
+        conditions.append(exp.GTE(this=column, expression=_date_literal(window.start)))
+    if window.end is not None:
+        conditions.append(exp.LT(this=column.copy(), expression=_date_literal(window.end)))
     return conditions
+
+
+def _window(plan: QueryPlan, window: TimeRange) -> exp.Expression:
+    """One window as a single AND-ed condition."""
+    parts = _window_parts(plan, window)
+    if not parts:
+        raise CompilerBug("a comparison window must be bounded on both sides")
+    combined = parts[0]
+    for part in parts[1:]:
+        combined = exp.And(this=combined, expression=part)
+    return combined
 
 
 def _projections(plan: QueryPlan) -> tuple[list[exp.Expression], list[exp.Expression]]:
@@ -132,6 +166,28 @@ def _projections(plan: QueryPlan) -> tuple[list[exp.Expression], list[exp.Expres
     """
     select: list[exp.Expression] = []
     group: list[exp.Expression] = []
+
+    if plan.comparison_range is not None:
+        # The label leans on the windows being disjoint, which validation proved: any
+        # row at or after the anchor's start is in the current period, and every other
+        # row that survived the WHERE is in the comparison period.
+        anchor = plan.intent.time_range
+        if anchor is None or anchor.start is None:  # pragma: no cover - validated
+            raise CompilerBug("a comparison reached the builder without a bounded range")
+        label = exp.Case(
+            ifs=[
+                exp.If(
+                    this=exp.GTE(
+                        this=_parse(plan.metric.time_column),
+                        expression=_date_literal(anchor.start),
+                    ),
+                    true=exp.Literal.string(CURRENT_LABEL),
+                )
+            ],
+            default=exp.Literal.string(COMPARISON_LABEL),
+        )
+        select.append(label.as_(COMPARISON_ALIAS))
+        group.append(label.copy())
 
     if plan.intent.time_grain is not None:
         bucket = exp.func(
@@ -167,6 +223,10 @@ def _order_by(plan: QueryPlan, grouped: bool) -> list[exp.Ordered]:
     keys: list[exp.Ordered] = []
     tiebreakers = [exp.column(PERIOD_ALIAS)] if plan.intent.time_grain is not None else []
     tiebreakers += [exp.column(card.name) for card in plan.dimensions]
+    if plan.comparison_range is not None:
+        # DESC so 'current' sorts before 'comparison'. A reader wants the period they
+        # asked about on the first row.
+        keys.append(exp.Ordered(this=exp.column(COMPARISON_ALIAS), desc=True))
 
     sort = plan.intent.sort
     if sort is not None:
@@ -204,7 +264,9 @@ def _assert_only_known_tables(sql: str, plan: QueryPlan, layer: SemanticLayer) -
         if table.name not in layer.tables:
             raise CompilerBug(f"generated SQL references unknown table {table.name!r}")
 
-    allowed_bare = {plan.metric_alias, PERIOD_ALIAS} | {card.name for card in plan.dimensions}
+    allowed_bare = {plan.metric_alias, PERIOD_ALIAS, COMPARISON_ALIAS} | {
+        card.name for card in plan.dimensions
+    }
     for column in tree.find_all(exp.Column):
         qualifier = column.table
         if qualifier:
@@ -242,6 +304,24 @@ def _caveats(plan: QueryPlan) -> tuple[Caveat, ...]:
                     f"Default filters from the {plan.metric.name} definition were applied: "
                     f"{described}. A figure computed without them will not match."
                 ),
+            )
+        )
+
+    if plan.comparison_range is not None:
+        anchor = plan.intent.time_range
+        caveats.append(
+            Caveat(
+                source=CaveatSource.COMPILER,
+                text=(
+                    f"Two periods in one result, labelled by {COMPARISON_ALIAS}: "
+                    f"'{CURRENT_LABEL}' covers "
+                    f"{anchor.start}..{anchor.end} and '{COMPARISON_LABEL}' covers "
+                    f"{plan.comparison_range.start}..{plan.comparison_range.end}, both "
+                    "end-exclusive. The metric is recomputed per period rather than "
+                    "differenced, which is the only correct treatment for a ratio."
+                )
+                if anchor is not None
+                else "Two periods in one result.",
             )
         )
 
@@ -313,6 +393,8 @@ def compile_plan(plan: QueryPlan, layer: SemanticLayer) -> CompiledQuery:
     _assert_only_known_tables(sql, plan, layer)
 
     columns: list[str] = []
+    if plan.comparison_range is not None:
+        columns.append(COMPARISON_ALIAS)
     if plan.intent.time_grain is not None:
         columns.append(PERIOD_ALIAS)
     columns += [card.name for card in plan.dimensions]

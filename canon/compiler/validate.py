@@ -20,7 +20,12 @@ the actual fork instead of quietly substituting a dimension that happens to work
 from __future__ import annotations
 
 from canon.compiler.plan import QueryPlan, ResolvedFilter
-from canon.schemas.errors import InvalidIntent, InvalidIntentDetail, InvalidIntentReason
+from canon.schemas.errors import (
+    CompilerBug,
+    InvalidIntent,
+    InvalidIntentDetail,
+    InvalidIntentReason,
+)
 from canon.schemas.intent import QueryIntent
 from canon.semantic.cards import DimensionCard, JoinEdge, SemanticLayer
 
@@ -260,9 +265,51 @@ def validate_intent(intent: QueryIntent, layer: SemanticLayer) -> QueryPlan:
                 suggestions=tuple(str(name) for name in intent.dimensions),
             )
 
+    comparison_range = None
+    if intent.comparison is not None:
+        if intent.limit is not None:
+            # A LIMIT is applied after grouping, so it truncates whole periods: ordering
+            # puts the current period first and the limit cuts the comparison rows off
+            # entirely, leaving a result that looks like a comparison and contains one
+            # period. Top-N-per-period needs a window function the compiler does not
+            # emit, so this is refused rather than silently mangled.
+            raise _fail(
+                InvalidIntentReason.BAD_LIMIT,
+                "a limit cannot be combined with a comparison: the limit would cut off "
+                "one of the two periods and the result would look complete while "
+                "missing half its rows. Ask for the comparison without a limit, or ask "
+                "for the top rows of a single period.",
+                metric=metric.name,
+            )
+        # QueryIntent's validator already guarantees a bounded anchor, so derive cannot
+        # fail here; the overlap check is the part that needs saying out loud.
+        anchor = intent.time_range
+        if anchor is None:  # pragma: no cover - QueryIntent's validator forbids this
+            raise CompilerBug("a comparison reached validation without a time_range")
+        comparison_range = intent.comparison.derive(anchor)
+        if (
+            comparison_range.end is not None
+            and anchor.start is not None
+            and comparison_range.end > anchor.start
+        ):
+            raise _fail(
+                InvalidIntentReason.OVERLAPPING_COMPARISON,
+                f"a {intent.comparison.kind.value} comparison of "
+                f"{anchor.start}..{anchor.end} would cover "
+                f"{comparison_range.start}..{comparison_range.end}, which overlaps the "
+                "range it is compared against. A row inside the overlap belongs to both "
+                "periods, so the labels would be arbitrary. Narrow the range to less "
+                "than a year, or compare against the previous period instead.",
+                metric=metric.name,
+            )
+
     dimensions = _resolve_dimensions(intent, layer)
     filters = _resolve_filters(intent, layer)
-    needs_time = intent.time_grain is not None or intent.time_range is not None
+    needs_time = (
+        intent.time_grain is not None
+        or intent.time_range is not None
+        or comparison_range is not None
+    )
     required = _required_tables(intent, layer, dimensions, needs_time)
     joins = _resolve_joins(intent, layer, required)
 
@@ -273,4 +320,5 @@ def validate_intent(intent: QueryIntent, layer: SemanticLayer) -> QueryPlan:
         joins=joins,
         filters=filters,
         needs_time_column=needs_time,
+        comparison_range=comparison_range,
     )

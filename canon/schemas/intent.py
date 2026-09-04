@@ -19,11 +19,13 @@ Everything the compiler needs beyond this -- expressions, joins, grain, default 
 
 from __future__ import annotations
 
+from calendar import monthrange
 from datetime import date
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from canon.semantic.enums import (
+    ComparisonKind,
     DimensionName,
     FilterOp,
     MetricName,
@@ -95,6 +97,70 @@ class TimeRange(BaseModel):
         return after_start and before_end
 
 
+class Comparison(BaseModel):
+    """A period-over-period comparison against a derived range.
+
+    The model names the *kind* of comparison; the compiler derives the second range from
+    the anchor range. That split is the same principle as the rest of the design: the
+    model supplies intent, deterministic code supplies arithmetic.
+    """
+
+    model_config = _FROZEN
+
+    kind: ComparisonKind
+
+    def derive(self, anchor: TimeRange) -> TimeRange:
+        """The range to compare against.
+
+        Requires a bounded anchor -- "compared to the previous period" is meaningless
+        without knowing which period, and guessing one would invent a number. Validation
+        turns the unbounded case into a clarifying question instead.
+        """
+        if anchor.start is None or anchor.end is None:
+            raise ValueError("a comparison needs a time_range with both start and end")
+
+        if self.kind is ComparisonKind.PREVIOUS_PERIOD:
+            months = _aligned_month_span(anchor)
+            if months is not None:
+                # Month-aligned ranges shift by whole calendar months, so the month
+                # before March is February and not "the 31 days before 1 March". A
+                # day-count shift would start February on 29 January and quietly
+                # report a number nobody asked for.
+                return TimeRange(start=_shift_months(anchor.start, months), end=anchor.start)
+            span = anchor.end - anchor.start
+            return TimeRange(start=anchor.start - span, end=anchor.start)
+
+        return TimeRange(start=_shift_months(anchor.start, 12), end=_shift_months(anchor.end, 12))
+
+
+def _aligned_month_span(anchor: TimeRange) -> int | None:
+    """Whole months covered by ``anchor``, or None if it is not month-aligned.
+
+    Month-aligned means both bounds fall on the first of a month, which is what a
+    question about a month, quarter, or year produces.
+    """
+    if anchor.start is None or anchor.end is None:
+        return None
+    if anchor.start.day != 1 or anchor.end.day != 1:
+        return None
+    months = (anchor.end.year - anchor.start.year) * 12 + (anchor.end.month - anchor.start.month)
+    return months if months >= 1 else None
+
+
+def _shift_months(value: date, months: int) -> date:
+    """``value`` moved back by ``months``, clamping to the last valid day.
+
+    31 March has no counterpart on a 30-day month and 29 February none in a common
+    year. Clamping is the convention finance systems use; raising would fail a
+    legitimate question about a month end.
+    """
+    total = (value.year * 12 + value.month - 1) - months
+    year, month = divmod(total, 12)
+    month += 1
+    day = min(value.day, monthrange(year, month)[1])
+    return date(year, month, day)
+
+
 class SortSpec(BaseModel):
     """How to order the result."""
 
@@ -129,6 +195,10 @@ class QueryIntent(BaseModel):
     guarantees the range spans it and the caveat fires."""
 
     filters: tuple[IntentFilter, ...] = ()
+    comparison: Comparison | None = None
+    """Set to return the metric for the requested range and a derived earlier range,
+    labelled, in one result. The delta is arithmetic on those rows, not more SQL."""
+
     sort: SortSpec | None = None
     limit: int | None = Field(default=None, gt=0, le=10_000)
 
@@ -136,4 +206,11 @@ class QueryIntent(BaseModel):
     def _check_dimensions(self) -> QueryIntent:
         if len(set(self.dimensions)) != len(self.dimensions):
             raise ValueError("dimensions contains duplicates")
+        if self.comparison is not None and (
+            self.time_range is None or self.time_range.start is None or self.time_range.end is None
+        ):
+            raise ValueError(
+                "a comparison needs a bounded time_range: 'compared to the previous "
+                "period' has no meaning without knowing which period"
+            )
         return self

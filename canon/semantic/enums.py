@@ -140,3 +140,20 @@ class SortTarget(StrEnum):
     METRIC = "metric"
     PERIOD = "period"
     DIMENSION = "dimension"
+
+
+class ComparisonKind(StrEnum):
+    """A period-over-period comparison.
+
+    The comparison range is *derived* from the requested range, never supplied by the
+    model: "compared to last month" is a transformation of the anchor range, and letting
+    the model compute the second range would put arithmetic it can get wrong on the
+    critical path.
+    """
+
+    PREVIOUS_PERIOD = "previous_period"
+    """Immediately preceding window of the same length. MoM for a month, QoQ for a
+    quarter -- the grain follows the range the question already asked for."""
+
+    PREVIOUS_YEAR = "previous_year"
+    """The same window shifted back one calendar year. YoY."""
