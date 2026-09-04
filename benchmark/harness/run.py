@@ -42,7 +42,7 @@ from benchmark.harness.score import (
 from canon.agent.llm import CallContext, LlmClient
 from canon.agent.pipeline import CanonPipeline, PipelineResult
 from canon.agent.policy import PolicyThresholds
-from canon.agent.providers import DEFAULT_PROVIDER, is_free_tier
+from canon.agent.providers import DEFAULT_PROVIDER, QuotaExhausted, is_free_tier
 from canon.semantic.loader import load_semantic_layer, semantic_layer_hash
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -87,6 +87,14 @@ class Provenance(BaseModel):
     question_count: int
     runs: int
     cache_used: bool
+
+    complete: bool = True
+    """False when the sweep did not finish -- quota exhausted, or interrupted. A partial
+    sweep is not averaged and not reported as a result; the report is stamped INCOMPLETE
+    and says how much is missing."""
+
+    completed_units: int = 0
+    expected_units: int = 0
 
 
 TUNING_RESULT = REPO_ROOT / "benchmark" / "dev" / "tuning_result.json"
@@ -163,6 +171,55 @@ def _variance_across_runs(
             "per_run": present,
         }
     return {"runs": len(runs), "rates": rates}
+
+
+class WorkItem(BaseModel):
+    """One unit of work: a system, a run index, and a question."""
+
+    model_config = _FROZEN
+
+    system: str
+    run_index: int
+    question_id: str
+
+    @property
+    def key(self) -> str:
+        return f"{self.system}|{self.run_index}|{self.question_id}"
+
+
+def _load_checkpoint(path: Path) -> dict[str, QuestionScore]:
+    """Rehydrate completed work from a previous session.
+
+    Keyed by system, run index and question id, so resuming re-does nothing and the
+    quota spent yesterday is not spent again.
+    """
+    if not path.exists():
+        return {}
+    done: dict[str, QuestionScore] = {}
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        record = json.loads(line)
+        item = WorkItem(
+            system=record["_system"],
+            run_index=record["_run_index"],
+            question_id=record["question_id"],
+        )
+        done[item.key] = QuestionScore(**{k: v for k, v in record.items() if not k.startswith("_")})
+    return done
+
+
+def _append_checkpoint(path: Path, item: WorkItem, score: QuestionScore) -> None:
+    """Write one result immediately.
+
+    After every question rather than at the end: a session that dies to quota, a network
+    drop, or a keyboard interrupt must lose at most the question in flight.
+    """
+    record = score.model_dump(mode="json")
+    record["_system"] = item.system
+    record["_run_index"] = item.run_index
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(record, sort_keys=True) + "\n")
 
 
 def _git(*args: str) -> str:
@@ -441,64 +498,131 @@ def main() -> int:
     out_dir = RUNS_DIR / tag
     out_dir.mkdir(parents=True, exist_ok=True)
 
+    checkpoint_path = out_dir / "checkpoint.jsonl"
+    done = _load_checkpoint(checkpoint_path)
+    if done:
+        print(f"resuming: {len(done)} units already complete in {checkpoint_path.name}")
+
+    systems = (
+        ["baseline", "canon"]
+        if args.system == "both"
+        else ["canon" if args.system == "canon" else "baseline"]
+    )
+    # Baseline first: it costs about a seventh of Canon per question, so on a
+    # constrained day it finishes and leaves one comparison arm whole.
+    work: list[WorkItem] = [
+        WorkItem(system=system, run_index=run_index, question_id=question.id)
+        for system in systems
+        for run_index in range(args.runs)
+        for question in selected
+    ]
+    expected_units = len(work)
+    pending = [item for item in work if item.key not in done]
+    print(f"{expected_units} units total, {len(pending)} to do\n")
+
+    by_id = {item.id: item for item in selected}
+    pipeline: CanonPipeline | None = None
+    baseline: NaiveBaseline | None = None
+    complete = True
+
+    try:
+        for position, item in enumerate(pending, start=1):
+            question = by_id[item.question_id]
+            context = CallContext(
+                system=item.system, question_id=item.question_id, run_index=item.run_index
+            )
+            try:
+                if item.system == "canon":
+                    if pipeline is None:
+                        pipeline = CanonPipeline(
+                            db_path=DB_PATH,
+                            layer=layer,
+                            client=LlmClient(
+                                provider=provenance_client.provider,
+                                use_cache=not args.no_cache,
+                            ),
+                            thresholds=thresholds,
+                            decision_log=out_dir / "decisions.jsonl",
+                        )
+                    score = score_canon(
+                        question, pipeline.answer(question.question, context), gold, subset
+                    )
+                else:
+                    if baseline is None:
+                        baseline = NaiveBaseline(
+                            db_path=DB_PATH,
+                            client=LlmClient(
+                                provider=provenance_client.provider,
+                                use_cache=not args.no_cache,
+                            ),
+                        )
+                    score = score_baseline(
+                        question, baseline.answer(question.question, context), gold, subset
+                    )
+            except QuotaExhausted as exhausted:
+                # The expected end of a session, not a failure. Everything so far is on
+                # disk; re-run the identical command tomorrow to continue.
+                print(f"\nQUOTA EXHAUSTED after {position - 1} of {len(pending)} pending units")
+                print(f"  {exhausted}")
+                print(f"  progress saved to {checkpoint_path}")
+                print(f"  resume with the SAME --tag {tag}")
+                complete = False
+                break
+            except KeyboardInterrupt:
+                print("\ninterrupted; progress is checkpointed")
+                complete = False
+                break
+
+            done[item.key] = score
+            _append_checkpoint(checkpoint_path, item, score)
+            print(
+                f"[{item.system} r{item.run_index} {position}/{len(pending)}] "
+                f"{item.question_id:8} {score.outcome.value:8} "
+                f"value={score.value_correct} metric={score.metric_used or '-'}"
+            )
+    finally:
+        if pipeline is not None:
+            pipeline.close()
+        if baseline is not None:
+            baseline.close()
+
     aggregates: list[Aggregate] = []
     all_scores: dict[str, list[QuestionScore]] = {}
     per_run: dict[str, list[list[QuestionScore]]] = {}
 
-    if args.system in ("canon", "both"):
-        client = LlmClient(provider=provenance_client.provider, use_cache=not args.no_cache)
-        pipeline = CanonPipeline(
-            db_path=DB_PATH,
-            layer=layer,
-            client=client,
-            thresholds=thresholds,
-            decision_log=out_dir / "decisions.jsonl",
-        )
-        try:
-            for run_index in range(args.runs):
-                scores = []
-                for index, question in enumerate(selected, start=1):
-                    result = pipeline.answer(
-                        question.question,
-                        CallContext(system="canon", question_id=question.id, run_index=run_index),
-                    )
-                    score = score_canon(question, result, gold, subset)
-                    scores.append(score)
-                    print(
-                        f"[canon r{run_index} {index}/{len(selected)}] {question.id:8} "
-                        f"{score.outcome.value:8} "
-                        f"value={score.value_correct} metric={score.metric_used or '-'}"
-                    )
-                per_run.setdefault("canon", []).append(scores)
-        finally:
-            pipeline.close()
-        all_scores["canon"] = per_run["canon"][0]
-        aggregates.append(aggregate("canon", per_run["canon"][0], subset))
+    # Only assemble arms that are whole. A tier with missing questions is not averaged:
+    # a truncated run is incomplete, not a smaller result.
+    for system in systems:
+        runs: list[list[QuestionScore]] = []
+        for run_index in range(args.runs):
+            scores = [
+                done[WorkItem(system=system, run_index=run_index, question_id=q.id).key]
+                for q in selected
+                if WorkItem(system=system, run_index=run_index, question_id=q.id).key in done
+            ]
+            if len(scores) == len(selected):
+                runs.append(scores)
+            elif scores:
+                print(
+                    f"  {system} run {run_index}: {len(scores)}/{len(selected)} questions "
+                    "-- INCOMPLETE, excluded from the report"
+                )
+                complete = False
+        if runs:
+            per_run[system] = runs
+            all_scores[system] = runs[0]
+            aggregates.append(aggregate(system, runs[0], subset))
+        else:
+            complete = False
 
-    if args.system in ("baseline", "both"):
-        client = LlmClient(provider=provenance_client.provider, use_cache=not args.no_cache)
-        baseline = NaiveBaseline(db_path=DB_PATH, client=client)
-        try:
-            for run_index in range(args.runs):
-                scores = []
-                for index, question in enumerate(selected, start=1):
-                    output = baseline.answer(
-                        question.question,
-                        CallContext(
-                            system="baseline", question_id=question.id, run_index=run_index
-                        ),
-                    )
-                    score = score_baseline(question, output, gold, subset)
-                    scores.append(score)
-                    print(
-                        f"[baseline r{run_index} {index}/{len(selected)}] {question.id:8} "
-                        f"{score.outcome.value:8} value={score.value_correct}"
-                    )
-                per_run.setdefault("baseline", []).append(scores)
-        finally:
-            baseline.close()
-        all_scores["baseline"] = per_run["baseline"][0]
-        aggregates.append(aggregate("baseline", per_run["baseline"][0], subset))
+    completed_units = len(done)
+    provenance = provenance.model_copy(
+        update={
+            "complete": complete and completed_units == expected_units,
+            "completed_units": completed_units,
+            "expected_units": expected_units,
+        }
+    )
 
     for system, runs in per_run.items():
         for run_index, scores in enumerate(runs):
@@ -543,6 +667,13 @@ def main() -> int:
     )
 
     print(f"\nwrote {out_dir.relative_to(REPO_ROOT)}/report.md")
+    if not provenance.complete:
+        print(
+            f"\nRUN IS INCOMPLETE: {provenance.completed_units}/{provenance.expected_units} "
+            "units. The report is stamped INCOMPLETE and its numbers must not be quoted."
+        )
+        print(f"Resume with: uv run python -m benchmark.harness.run --tag {tag} ...")
+        return 2
     return 0
 
 
