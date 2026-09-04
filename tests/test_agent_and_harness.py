@@ -9,6 +9,7 @@ instead, which is where the guarantees actually live.
 from __future__ import annotations
 
 import json
+import re
 from datetime import date
 from decimal import Decimal
 from pathlib import Path
@@ -828,3 +829,58 @@ class TestThresholdProvenanceIsHonest:
         dev = yaml.safe_load(dev_path.read_text(encoding="utf-8"))
         behaviors = {item["expected_behavior"] for item in dev}
         assert behaviors == {"answer", "clarify", "refuse"}
+
+
+class TestGoldAgreesWithTheCards:
+    """Gold SQL must compute what the metric card says, not merely run.
+
+    Gold was already verified two ways -- the SQL executes, and its value is committed --
+    and neither catches a *conceptual* error: gold that quietly disagrees with the card it
+    was written from. Gold omitting a card's default filter is wrong in exactly the way a
+    schema-only system is wrong, and it would mark correct answers as failures. This check
+    was added after mining the completed baseline arm made the gap obvious.
+    """
+
+    def test_every_gold_query_applies_its_cards_default_filters(
+        self, questions, layer: SemanticLayer
+    ) -> None:
+        problems: list[str] = []
+        for item in questions.answerable:
+            card = layer.metrics[item.expected_metric]
+            sql = " ".join((item.gold_sql or "").split()).lower()
+            for semantic_filter in card.default_filters:
+                column = semantic_filter.qualified.column.lower()
+                if column not in sql:
+                    problems.append(
+                        f"{item.id}: {card.name} always filters on {column}, "
+                        "absent from the gold SQL"
+                    )
+                    continue
+                for value in semantic_filter.values:
+                    if str(value).lower() not in sql:
+                        problems.append(
+                            f"{item.id}: {card.name} filters {column} on {value!r}, "
+                            "absent from the gold SQL"
+                        )
+        assert not problems, "gold disagrees with the cards:\n  " + "\n  ".join(problems)
+
+    def test_every_gold_query_computes_over_its_cards_columns(
+        self, questions, layer: SemanticLayer
+    ) -> None:
+        """A gold query for net_revenue that never mentions price computes something else."""
+        pattern = re.compile(
+            r"order_items\.(\w+)|orders\.(\w+)|order_payments\.(\w+)"
+            r"|order_reviews\.(\w+)|customers\.(\w+)"
+        )
+        problems: list[str] = []
+        for item in questions.answerable:
+            card = layer.metrics[item.expected_metric]
+            sql = " ".join((item.gold_sql or "").split()).lower()
+            for match in pattern.findall(card.expression):
+                column = next(part for part in match if part)
+                if column not in sql:
+                    problems.append(
+                        f"{item.id}: {card.name} computes over {column}, "
+                        "which the gold SQL does not mention"
+                    )
+        assert not problems, "gold does not compute the card:\n  " + "\n  ".join(problems)
