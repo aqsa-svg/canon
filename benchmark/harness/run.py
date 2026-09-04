@@ -39,9 +39,10 @@ from benchmark.harness.score import (
     paired_discrimination,
     rows_match,
 )
-from canon.agent.llm import MODEL_ID, CallContext, LlmClient
+from canon.agent.llm import CallContext, LlmClient
 from canon.agent.pipeline import CanonPipeline, PipelineResult
 from canon.agent.policy import PolicyThresholds
+from canon.agent.providers import DEFAULT_PROVIDER, is_free_tier
 from canon.semantic.loader import load_semantic_layer, semantic_layer_hash
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -61,6 +62,19 @@ class Provenance(BaseModel):
     code_commit: str
     eval_set_commit: str
     metrics_yaml_sha256: str
+
+    provider: str
+    """Which backend answered. A result from one provider is not a result from another,
+    so this is part of the run's identity rather than a footnote."""
+
+    provider_config_hash: str
+    """Fingerprint of model id and decoding settings. Two runs with different hashes are
+    not comparable, and the hash makes that checkable instead of assumed."""
+
+    free_tier: bool
+    """Whether this run cost nothing. The project's constraint is a $0 reproduction, so a
+    run that quietly used a paid provider must be visible as such."""
+
     model_id: str
     effort: str
     policy_thresholds: PolicyThresholds
@@ -352,7 +366,21 @@ def score_baseline(
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--limit", type=int, default=None, help="score only the first N")
+    parser.add_argument(
+        "--ids",
+        default=None,
+        help=(
+            "comma-separated question ids. Preferred over --limit for a smoke run: the "
+            "first N questions in load order are all from ambiguous.yaml, which exercises "
+            "the refusal path and says nothing about grain or metric selection."
+        ),
+    )
     parser.add_argument("--system", choices=["canon", "baseline", "both"], default="both")
+    parser.add_argument(
+        "--provider",
+        default=DEFAULT_PROVIDER,
+        help="which backend answers; both systems always share it",
+    )
     parser.add_argument("--runs", type=int, default=1, help="independent samples per question")
     parser.add_argument("--no-cache", action="store_true", help="ignore the response cache")
     parser.add_argument("--tag", default=None, help="label for the output directory")
@@ -363,18 +391,44 @@ def main() -> int:
     questions.validate_against(layer)
     gold = _load_gold()
 
-    selected = questions.questions[: args.limit] if args.limit else questions.questions
+    if args.ids:
+        wanted = [item.strip() for item in args.ids.split(",") if item.strip()]
+        by_id = {item.id: item for item in questions.questions}
+        missing = [name for name in wanted if name not in by_id]
+        if missing:
+            print(f"unknown question ids: {', '.join(missing)}")
+            return 1
+        selected = tuple(by_id[name] for name in wanted)
+    elif args.limit:
+        selected = questions.questions[: args.limit]
+    else:
+        selected = questions.questions
     subset = QuestionSet(questions=selected)
 
     thresholds = PolicyThresholds()
+    provenance_client = LlmClient(provider=args.provider, use_cache=not args.no_cache)
+
+    # Never mix providers inside one comparison. Canon and the baseline must answer on
+    # the same backend or the delta between them measures the backend, not the
+    # architecture -- so both are constructed from this single client's provider.
+    if args.system == "both" and not provenance_client.has_credentials():
+        print(
+            f"no credentials for provider {provenance_client.name!r}. "
+            "Add the key to .env, or run scripts/dry_run.py which needs none."
+        )
+        return 1
+
     started = datetime.now(UTC)
     provenance = Provenance(
         started_at=started.isoformat(),
         code_commit=_git("rev-parse", "--short", "HEAD"),
         eval_set_commit=_git("log", "-1", "--format=%h", "--", "benchmark/questions"),
         metrics_yaml_sha256=semantic_layer_hash(),
-        model_id=MODEL_ID,
-        effort=LlmClient().effort,
+        provider=provenance_client.name,
+        provider_config_hash=provenance_client.config_hash,
+        free_tier=is_free_tier(provenance_client.name),
+        model_id=provenance_client.model,
+        effort=provenance_client.effort,
         policy_thresholds=thresholds,
         threshold_provenance=threshold_provenance(),
         confident_threshold=CONFIDENT_THRESHOLD,
@@ -392,7 +446,7 @@ def main() -> int:
     per_run: dict[str, list[list[QuestionScore]]] = {}
 
     if args.system in ("canon", "both"):
-        client = LlmClient(use_cache=not args.no_cache)
+        client = LlmClient(provider=provenance_client.provider, use_cache=not args.no_cache)
         pipeline = CanonPipeline(
             db_path=DB_PATH,
             layer=layer,
@@ -422,7 +476,7 @@ def main() -> int:
         aggregates.append(aggregate("canon", per_run["canon"][0], subset))
 
     if args.system in ("baseline", "both"):
-        client = LlmClient(use_cache=not args.no_cache)
+        client = LlmClient(provider=provenance_client.provider, use_cache=not args.no_cache)
         baseline = NaiveBaseline(db_path=DB_PATH, client=client)
         try:
             for run_index in range(args.runs):

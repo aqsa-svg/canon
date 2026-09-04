@@ -42,8 +42,11 @@ class MetricCandidate(BaseModel):
     reads.
     """
 
-    why: str
-    """One sentence. Shown in the decision log so a scoring choice can be audited."""
+    why: str = ""
+    """One sentence, for the decision log. Optional because requiring it turned a correct
+    metric choice into a hard call failure on Groq -- the model routinely omits it, and
+    losing the whole answer to a missing audit note is the wrong trade. Empty strings in
+    the log are the visible cost."""
 
 
 class AgentDecision(BaseModel):

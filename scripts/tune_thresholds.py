@@ -28,7 +28,7 @@ from typing import Any
 import yaml
 from pydantic import BaseModel, ConfigDict
 
-from canon.agent.llm import MODEL_ID, CallContext, LlmClient, LlmError
+from canon.agent.llm import CallContext, LlmClient, LlmError
 from canon.agent.pipeline import CanonPipeline
 from canon.agent.policy import PolicyOutcome, PolicyThresholds, decide
 from canon.schemas.decision import AgentDecision
@@ -68,7 +68,7 @@ def main() -> int:
     client = LlmClient()
     pipeline = CanonPipeline(db_path=DB_PATH, layer=layer, client=client, decision_log=None)
 
-    print(f"collecting decisions for {len(dev)} dev questions ({MODEL_ID})")
+    print(f"collecting decisions for {len(dev)} dev questions ({client.name} / {client.model})")
     decisions: dict[str, AgentDecision] = {}
     try:
         for item in dev:
@@ -151,7 +151,8 @@ def main() -> int:
     current = PolicyThresholds()
     payload = {
         "tuned_at": datetime.now(UTC).isoformat(),
-        "model_id": MODEL_ID,
+        "model_id": client.model,
+        "provider": client.name,
         "effort": client.effort,
         "dev_question_count": len(dev),
         "dev_question_ids": [item.id for item in dev],

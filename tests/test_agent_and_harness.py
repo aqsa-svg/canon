@@ -598,12 +598,13 @@ class TestCacheKeyingMakesRunsIndependent:
         from canon.agent.llm import CallContext, _cache_key
 
         base = {
+            "provider": "groq",
+            "model_id": "openai/gpt-oss-120b",
+            "config_hash": "abc123",
             "system": "sys",
             "question": "q",
             "schema_name": "AgentDecision",
             "schema": "{}",
-            "effort": "medium",
-            "model": "claude-opus-5",
         }
         first = _cache_key(
             **base, context=CallContext(system="canon", question_id="t1-01", run_index=0)
@@ -620,12 +621,13 @@ class TestCacheKeyingMakesRunsIndependent:
         from canon.agent.llm import CallContext, _cache_key
 
         base = {
+            "provider": "groq",
+            "model_id": "openai/gpt-oss-120b",
+            "config_hash": "abc123",
             "system": "sys",
             "question": "q",
             "schema_name": "AgentDecision",
             "schema": "{}",
-            "effort": "medium",
-            "model": "claude-opus-5",
         }
         canon = _cache_key(
             **base, context=CallContext(system="canon", question_id="t1-01", run_index=0)
@@ -635,17 +637,37 @@ class TestCacheKeyingMakesRunsIndependent:
         )
         assert canon != baseline
 
+    def test_two_providers_never_share_a_cached_answer(self) -> None:
+        """Otherwise a cross-provider robustness check could compare a provider to itself."""
+        from canon.agent.llm import CallContext, _cache_key
+
+        common = {
+            "system": "sys",
+            "question": "q",
+            "schema_name": "AgentDecision",
+            "schema": "{}",
+            "context": CallContext(system="canon", question_id="t1-01", run_index=0),
+        }
+        groq = _cache_key(
+            provider="groq", model_id="openai/gpt-oss-120b", config_hash="a", **common
+        )
+        gemini = _cache_key(
+            provider="gemini", model_id="gemini-2.5-flash", config_hash="b", **common
+        )
+        assert groq != gemini
+
     def test_no_context_keeps_content_only_keying(self) -> None:
         """The demo wants cache hits, so an absent context must not vary the key."""
         from canon.agent.llm import _cache_key
 
         base = {
+            "provider": "groq",
+            "model_id": "openai/gpt-oss-120b",
+            "config_hash": "abc123",
             "system": "sys",
             "question": "q",
             "schema_name": "AgentDecision",
             "schema": "{}",
-            "effort": "medium",
-            "model": "claude-opus-5",
         }
         assert _cache_key(**base, context=None) == _cache_key(**base, context=None)
 

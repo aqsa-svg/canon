@@ -43,14 +43,61 @@ ModelT = TypeVar("ModelT", bound=BaseModel)
 TOOL_NAME = "submit_query_intent"
 
 
-def _strict_schema(schema: type[BaseModel]) -> dict[str, Any]:
-    """A JSON schema with ``additionalProperties: false`` throughout.
+MAX_INLINE_DEPTH = 12
+"""Guard against a self-referential model inlining forever. Nothing in Canon's schemas
+recurses, so hitting this is a bug worth surfacing rather than tolerating."""
 
-    Providers that validate strictly reject a schema that permits extra keys, and a
-    schema that permits them defeats the point: an unexpected field is how a
-    hallucinated metric would sneak back in.
+
+def _inline_defs(schema: dict[str, Any]) -> dict[str, Any]:
+    """Replace every ``$ref`` with the definition it points at.
+
+    Required for any provider whose validator does not resolve ``$ref``. Groq's does not,
+    and the failure mode is not a clean error: the nested model becomes invisible, so the
+    model guesses field names (``breakdown`` for ``dimensions``) and the validator
+    misreads a nullable object as null-only.
     """
-    raw = schema.model_json_schema()
+    definitions = schema.get("$defs", {})
+
+    def resolve(node: Any, ref_depth: int) -> Any:
+        # Only $ref resolution can recurse without bound, so only that increments the
+        # counter. Counting ordinary structural nesting instead tripped the guard on a
+        # perfectly finite schema.
+        if isinstance(node, dict):
+            reference = node.get("$ref")
+            if isinstance(reference, str) and reference.startswith("#/$defs/"):
+                if ref_depth >= MAX_INLINE_DEPTH:
+                    raise ProviderError(
+                        "schema resolves $ref deeper than the inlining guard allows; a "
+                        "recursive model cannot be sent to a provider that will not "
+                        "resolve $ref itself"
+                    )
+                name = reference.split("/")[-1]
+                if name not in definitions:
+                    raise ProviderError(f"schema references unknown definition {name!r}")
+                # Keep any siblings of the $ref (description, default) and let the
+                # definition supply the structure.
+                merged = {key: value for key, value in node.items() if key != "$ref"}
+                return {**resolve(definitions[name], ref_depth + 1), **merged}
+            return {key: resolve(value, ref_depth) for key, value in node.items()}
+        if isinstance(node, list):
+            return [resolve(item, ref_depth) for item in node]
+        return node
+
+    inlined = resolve({key: value for key, value in schema.items() if key != "$defs"}, 0)
+    return inlined  # type: ignore[no-any-return]
+
+
+def _strict_schema(schema: type[BaseModel]) -> dict[str, Any]:
+    """A fully inlined JSON schema with ``additionalProperties: false`` throughout.
+
+    Two transformations, both for strict validators:
+
+    * ``$defs`` are inlined, so a provider that will not follow ``$ref`` still sees every
+      nested field. Without this the model cannot know what to fill in.
+    * every object forbids extra properties, because a schema that permits them defeats
+      the point -- an unexpected field is how a hallucinated metric would sneak back in.
+    """
+    raw = _inline_defs(schema.model_json_schema())
 
     def close(node: Any) -> Any:
         if isinstance(node, dict):
