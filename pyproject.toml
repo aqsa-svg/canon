@@ -1,0 +1,91 @@
+[project]
+name = "canon"
+version = "0.1.0"
+description = "A trustworthy analytics agent: verified numbers, exact SQL, canonical metric definitions, and a refusal when the question is genuinely ambiguous."
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "pydantic>=2.9",
+    "duckdb>=1.1",
+    "sqlglot>=25.24",
+    "pyyaml>=6.0.2",
+    "python-dotenv>=1.0.1",
+    # LLM boundary. Unused on Day 1 -- the compiler and loader make zero calls.
+    "anthropic>=0.40",
+    "instructor>=1.6",
+    # demo surface
+    "streamlit>=1.39",
+    "pandas>=2.2",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3",
+    "ruff>=0.7",
+    "types-pyyaml>=6.0.12",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["canon"]
+
+# ---------------------------------------------------------------------------
+# Ruff
+# ---------------------------------------------------------------------------
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+extend-exclude = ["data"]
+
+[tool.ruff.lint]
+select = [
+    "E",    # pycodestyle errors
+    "W",    # pycodestyle warnings
+    "F",    # pyflakes
+    "I",    # import sorting
+    "UP",   # pyupgrade
+    "B",    # bugbear
+    "SIM",  # simplify
+    "C4",   # comprehensions
+    "N",    # naming
+    "ANN",  # annotations -- CLAUDE.md requires typed everything
+    "PTH",  # pathlib over os.path
+    "TID",  # tidy imports
+    "RUF",
+]
+ignore = [
+    "E501",    # line length is formatter's job
+    "ANN401",  # Any is allowed where commented; see CLAUDE.md
+    "B008",    # pydantic Field() in defaults is idiomatic
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests may use magic numbers and skip return annotations.
+"tests/**" = ["ANN201", "ANN001", "PLR2004"]
+"scripts/**" = ["T201"]  # scripts print; that is their interface
+
+[tool.ruff.lint.flake8-tidy-imports]
+# Enforce the one-way dependency direction from CLAUDE.md:
+# schemas <- semantic <- compiler <- agent <- app
+ban-relative-imports = "all"
+
+[tool.ruff.format]
+docstring-code-format = true
+
+# ---------------------------------------------------------------------------
+# pytest
+# ---------------------------------------------------------------------------
+[tool.pytest.ini_options]
+minversion = "8.0"
+testpaths = ["tests"]
+addopts = "-q --strict-markers --strict-config"
+markers = [
+    # Day 1 has zero LLM calls in the suite, and that stays true: anything that
+    # touches the API is marked and excluded from the default run.
+    "llm: requires a live Anthropic API key and makes network calls (deselect with -m 'not llm')",
+    "data: requires data/canon.duckdb to have been built by scripts/load_data.py",
+]
+filterwarnings = ["error::DeprecationWarning"]

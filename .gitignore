@@ -1,0 +1,18 @@
+# python
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+
+# secrets
+.env
+
+# data: large, downloaded, and reproducible via scripts/load_data.py
+data/raw/
+data/*.duckdb
+data/*.duckdb.wal
+
+# benchmark run outputs (results are committed deliberately, not incidentally)
+benchmark/runs/
