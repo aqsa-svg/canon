@@ -166,6 +166,76 @@ def rows_match(
     )
 
 
+def shape_matches(
+    question: Question,
+    actual: tuple[tuple[Any, ...], ...],
+    expected: tuple[tuple[Any, ...], ...],
+) -> bool | None:
+    """Did the answer have the right *form*, setting aside whether the numbers agree?
+
+    Three things must hold, and nothing about filter correctness:
+
+    * the same number of columns -- a breakdown answered as a scalar is a different
+      question, not a filter mistake;
+    * the same *kinds* of column in the same positions, so a period column is matched
+      against a period column and a metric against a metric;
+    * a plausible row count for the grain: exact where gold is a scalar or a comparison,
+      and within a tolerance where gold is a time series, because a series whose filters
+      differ legitimately spans a different number of buckets.
+
+    ``None`` when there is nothing to compare against.
+
+    The point of the metric is to separate "asked for the wrong thing" from "asked for the
+    right thing under the wrong definition". The baseline does the second constantly and
+    the first rarely, and execution accuracy alone cannot tell them apart.
+    """
+    if not expected:
+        return None
+    if not actual:
+        return False
+
+    gold_width = len(expected[0])
+    actual_width = len(actual[0])
+    if actual_width != gold_width:
+        return False
+
+    # Same fairness adjustment as rows_match: on a comparison question Canon keys the two
+    # periods 'current'/'comparison' and gold follows that convention, while a system
+    # answering "March vs the month before" with two month-keyed rows has answered
+    # correctly. Judging the key column's *type* here would penalise that convention a
+    # second time, having already excused it for the value comparison.
+    if question.expected_comparison:
+        return len(actual) == len(expected)
+
+    def kind(cell: Any) -> str:
+        value = _decimalise(cell)
+        if value is None:
+            return "null"
+        if isinstance(value, Decimal | int | float) and not isinstance(value, bool):
+            return "number"
+        text = str(value)
+        # A date-like string in the leading position is a period key, not a label.
+        return "period" if text[:4].isdigit() and "-" in text[:8] else "text"
+
+    gold_kinds = [kind(cell) for cell in expected[0]]
+    actual_kinds = [kind(cell) for cell in actual[0]]
+    # A null in one sample says nothing about the column's type, so it matches anything.
+    for gold_kind, actual_kind in zip(gold_kinds, actual_kinds, strict=True):
+        if "null" in (gold_kind, actual_kind):
+            continue
+        if gold_kind != actual_kind:
+            return False
+
+    if len(expected) == 1 or question.expected_comparison:
+        return len(actual) == len(expected)
+
+    # A time series or breakdown: allow a different bucket count, since a different
+    # filter legitimately changes how many groups exist. Reject an order-of-magnitude
+    # difference, which is a grouping error rather than a filter difference.
+    lower, upper = len(expected) / 3, len(expected) * 3
+    return lower <= len(actual) <= upper
+
+
 class Outcome(StrEnum):
     """What the system did, before judging whether it was right."""
 
@@ -192,6 +262,14 @@ class QuestionScore(BaseModel):
 
     metric_correct: bool | None = None
     """None when the system declares no metric -- the baseline's structural position."""
+
+    shape_correct: bool | None = None
+    """Right columns and a plausible grain, ignoring filters.
+
+    The lenient counterpart to value_correct. Reported only as a pair with it: alone it
+    flatters a system that knows the schema and not the semantics, which is precisely the
+    system it exists to describe.
+    """
 
     metric_used: str | None = None
     expected_metric: str | None = None
@@ -278,6 +356,15 @@ class Aggregate(BaseModel):
     should_not_answer: int
 
     execution_accuracy: float | None = None
+
+    shape_accuracy: float | None = None
+    """Correct columns and grain over answerable questions, filters disregarded.
+
+    The gap between this and execution accuracy is the size of the semantics problem: a
+    system scoring high here and low there knows the schema and not the business rules.
+    """
+
+    shape_measurable: int = 0
     semantic_accuracy: float | None = None
     semantic_measurable: int = 0
     """How many questions semantic accuracy could be computed on. Zero for a system that
@@ -329,6 +416,7 @@ class TierAggregate(BaseModel):
     tier: str
     count: int
     execution_accuracy: float | None = None
+    shape_accuracy: float | None = None
     semantic_accuracy: float | None = None
     refusal_accuracy: float | None = None
     behavior_accuracy: float | None = None
@@ -514,6 +602,9 @@ def aggregate(system: str, scores: list[QuestionScore], questions: QuestionSet) 
     semantic_pool = [s for s in answerable if s.metric_correct is not None]
     semantic_correct = sum(1 for s in semantic_pool if s.metric_correct)
 
+    shape_pool = [s for s in answerable if s.shape_correct is not None]
+    shape_correct = sum(1 for s in shape_pool if s.shape_correct)
+
     correct_attempts = sum(
         1 for s in answerable if s.outcome is Outcome.ANSWERED and s.value_correct is True
     )
@@ -548,6 +639,10 @@ def aggregate(system: str, scores: list[QuestionScore], questions: QuestionSet) 
             execution_accuracy=_rate(
                 sum(1 for s in tier_answerable if s.value_correct is True), len(tier_answerable)
             ),
+            shape_accuracy=_rate(
+                sum(1 for s in tier_answerable if s.shape_correct is True),
+                sum(1 for s in tier_answerable if s.shape_correct is not None),
+            ),
             semantic_accuracy=_rate(
                 sum(1 for s in tier_semantic if s.metric_correct), len(tier_semantic)
             ),
@@ -564,6 +659,8 @@ def aggregate(system: str, scores: list[QuestionScore], questions: QuestionSet) 
         answerable=len(answerable),
         should_not_answer=len(ambiguous),
         execution_accuracy=_rate(value_correct, len(answerable)),
+        shape_accuracy=_rate(shape_correct, len(shape_pool)),
+        shape_measurable=len(shape_pool),
         semantic_accuracy=_rate(semantic_correct, len(semantic_pool)),
         semantic_measurable=len(semantic_pool),
         refusal_accuracy=_rate(correct_attempts + correct_refusals, len(scores)),

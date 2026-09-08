@@ -33,10 +33,33 @@ groq:
     requests_per_day: 1000
     tokens_per_day: 200000
     source: >-
-      Groq free-tier limits for openai/gpt-oss-120b as stated in the project brief.
-      tokens_per_minute is the conservative figure; the binding constraint is
-      tokens_per_day.
+      MIXED PROVENANCE -- read the two claims separately, because only one of them is
+      actually verified.
+
+      tokens_per_minute = 8000 is PROVIDER-CONFIRMED. Groq refused a call on 2026-09-08
+      during run tag sweep-groq-r1 (question am-08) and quoted its own limit verbatim:
+      "Request too large for model openai/gpt-oss-120b in organization ... service tier
+      on_demand on tokens per minute (TPM): Limit 8000, Requested 8092". The full error
+      is preserved in benchmark/runs/sweep-groq-r1/checkpoint.jsonl under am-08. A
+      provider quoting its own ceiling while enforcing it is the strongest evidence
+      available short of reading the dashboard.
+
+      tokens_per_day = 200000 is NOT verified; it is a FLOOR. On 2026-09-04, run tag
+      sweep-groq-r1 consumed 199,516 tokens across 95 requests in one UTC day with zero
+      quota refusals, so the real daily cap is >= 199,516. It is not confirmed to be
+      exactly 200,000: both "exhaustion" events were this project's own limiter refusing
+      pre-emptively because config said 200,000, never Groq refusing. Treating that as
+      verification would verify the config against itself. What would actually verify it
+      is a 429 or a tokens-per-day rate_limit_exceeded from Groq, which has not happened
+      -- by design, since the limiter stops first.
+
+      requests_per_minute and requests_per_day remain unverified: neither has been
+      approached, let alone hit.
     verified: false
+    verified_note: >-
+      tokens_per_minute: verified by provider refusal (2026-09-08, am-08).
+      tokens_per_day: floor of 199,516 observed 2026-09-04; exact cap unverified.
+      requests_*: never approached.
 
 gemini:
   name: gemini

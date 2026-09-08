@@ -102,9 +102,17 @@ class RateLimits(BaseModel):
     projection is only as trustworthy as the limits it was computed from."""
 
     verified: bool = False
-    """True only when checked against the provider's current published limits on this
-    machine. Free-tier limits change without notice, so an unverified projection is
-    labelled as such rather than presented as fact."""
+    """True only when EVERY field has been confirmed against the provider itself.
+
+    Deliberately all-or-nothing, so a partially-verified set cannot be presented as
+    verified. Per-field status lives in ``verified_note``, because in practice the fields
+    have different evidence: a provider may quote its own per-minute limit while
+    refusing a call, and never say anything about the daily one.
+    """
+
+    verified_note: str = ""
+    """Per-field provenance, in prose. Surfaced in the dry-run alongside any projection
+    built on these numbers."""
 
 
 class ProviderConfig(BaseModel):

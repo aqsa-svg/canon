@@ -33,6 +33,21 @@ _FROZEN = ConfigDict(frozen=True, extra="forbid")
 MESSAGE_OVERHEAD_TOKENS = 24
 """Flat allowance for role markers and message framing, per call."""
 
+LIMITER_SAFETY_FACTOR = 1.10
+"""Multiplier the rate limiter applies to a local estimate before spending against it.
+
+Measured, then rounded up. Across 36 structured Groq calls the local estimate averaged
+6,914 tokens against Groq's own count of 7,035 -- 2% low. Two percent sounds harmless and
+is not: the per-minute bucket under-books every call, the drift accumulates inside the
+window, and Groq eventually refuses. That is exactly how question am-08 died, with
+"Limit 8000, Requested 8092" after roughly 1,000 tokens of the minute were already spent.
+
+10% rather than the measured 2% because the two errors are not symmetric. Under-booking
+gets a request refused and can lose a question; over-booking wastes a little headroom.
+The dry-run deliberately does NOT apply this factor -- a projection should report the
+measured cost, not a padded one.
+"""
+
 SCHEMA_OVERHEAD_RATIO = 1.0
 """Tool/response schemas are counted verbatim: they are part of the prompt the provider
 bills for, and on a 200k/day budget a 600-token schema per call is not a rounding error.

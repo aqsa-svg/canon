@@ -427,7 +427,28 @@ def _usage_from_anthropic(response: Any, elapsed: float) -> TokenUsage:
 
 
 # ----------------------------------------------------------------------- shared
-_RETRYABLE_MARKERS = ("429", "rate limit", "overloaded", "503", "502", "timeout", "500")
+_RETRYABLE_MARKERS = (
+    "429",
+    "rate limit",
+    "rate_limit",  # Groq's code is rate_limit_exceeded, with an underscore
+    "overloaded",
+    "503",
+    "502",
+    "timeout",
+    "500",
+    "request too large",  # Groq returns 413 for a per-minute token overage
+)
+"""Substrings that mean "try again later".
+
+``rate_limit`` and ``request too large`` are here because of a real loss: Groq refused
+question am-08 with HTTP 413 and code ``rate_limit_exceeded`` -- a transient per-minute
+overage that a retry would have cleared. Neither 413 nor the underscored code matched the
+original list, so it was classified permanent and the question errored out for good.
+"""
+
+_RETRYABLE_STATUSES = frozenset({408, 409, 413, 429, 500, 502, 503, 504})
+"""413 is included because Groq uses it for a rate-limit condition rather than for a
+genuinely oversized payload."""
 
 
 def _normalise(error: Exception) -> ProviderError:
@@ -442,7 +463,7 @@ def _normalise(error: Exception) -> ProviderError:
     status = getattr(error, "status_code", None) or getattr(error, "code", None)
     text = f"{type(error).__name__}: {error}"
     retryable = any(marker in text.lower() for marker in _RETRYABLE_MARKERS)
-    if isinstance(status, int) and status in (408, 409, 429, 500, 502, 503, 504):
+    if isinstance(status, int) and status in _RETRYABLE_STATUSES:
         retryable = True
     return ProviderError(
         text, retryable=retryable, status=status if isinstance(status, int) else None

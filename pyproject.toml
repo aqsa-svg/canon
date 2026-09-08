@@ -76,6 +76,9 @@ ignore = [
 # QuotaExhausted reads as the condition it describes -- the daily free-tier budget is
 # spent -- and it is caught by name in the runner. QuotaExhaustedError adds nothing.
 "canon/agent/providers/base.py" = ["N818"]
+# CacheMiss reads as the condition it describes and is caught by name in
+# scripts/rescore.py. CacheMissError adds nothing.
+"canon/agent/llm.py" = ["N818"]
 
 [tool.ruff.lint.flake8-tidy-imports]
 # Enforce the one-way dependency direction from CLAUDE.md:

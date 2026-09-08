@@ -36,7 +36,13 @@ from canon.agent.providers.quota import (
     ThrottleEvent,
     project,
 )
-from canon.agent.providers.tokens import CountAccuracy, TokenCount, count_call, count_tokens
+from canon.agent.providers.tokens import (
+    LIMITER_SAFETY_FACTOR,
+    CountAccuracy,
+    TokenCount,
+    count_call,
+    count_tokens,
+)
 
 CONFIG_PATH: Final[Path] = Path(__file__).with_name("providers.yaml")
 
@@ -90,6 +96,7 @@ __all__ = [
     "CONFIG_PATH",
     "DEFAULT_PROVIDER",
     "FREE_TIER",
+    "LIMITER_SAFETY_FACTOR",
     "AnthropicProvider",
     "CountAccuracy",
     "GeminiProvider",

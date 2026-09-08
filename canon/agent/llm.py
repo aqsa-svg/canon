@@ -37,6 +37,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from canon.agent.providers import (
     DEFAULT_PROVIDER,
+    LIMITER_SAFETY_FACTOR,
     LLMProvider,
     Prompt,
     ProviderError,
@@ -110,6 +111,15 @@ class Usage(BaseModel):
         return is_free_tier(self.provider)
 
 
+class CacheMiss(RuntimeError):
+    """A cache-only client was asked for something it did not have.
+
+    Exists so "this operation cannot spend quota" is a property of the code rather than
+    of my care. Re-scoring a finished run must be free; if it would need a live call, that
+    is a bug worth surfacing, not a budget to quietly consume.
+    """
+
+
 class LlmError(RuntimeError):
     """The call did not produce a usable structured object.
 
@@ -178,6 +188,7 @@ class LlmClient:
         provider: str | LLMProvider = DEFAULT_PROVIDER,
         cache_dir: Path = CACHE_DIR,
         use_cache: bool = True,
+        cache_only: bool = False,
         ledger: QuotaLedger | None = None,
     ) -> None:
         self.provider: LLMProvider = (
@@ -185,6 +196,9 @@ class LlmClient:
         )
         self.cache_dir = cache_dir
         self.use_cache = use_cache
+        self.cache_only = cache_only
+        """When set, a cache miss raises CacheMiss instead of calling the provider."""
+
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         self.limiter = RateLimiter(
             provider=self.provider.name,
@@ -209,6 +223,15 @@ class LlmClient:
     def effort(self) -> str:
         """Kept for provenance compatibility; not every provider has the concept."""
         return self.provider.config.reasoning_effort or "n/a"
+
+    @staticmethod
+    def _budget_estimate(local_estimate: int) -> int:
+        """Pad a local token estimate before spending it against a per-minute bucket.
+
+        The local count runs about 2% under what Groq charges, and an under-booked bucket
+        drifts until the provider refuses. See LIMITER_SAFETY_FACTOR for the measurement.
+        """
+        return int(local_estimate * LIMITER_SAFETY_FACTOR)
 
     def _blank_usage(self, cached: bool = False) -> Usage:
         return Usage(
@@ -294,9 +317,19 @@ class LlmClient:
             cached = json.loads(path.read_text(encoding="utf-8"))
             return output_format.model_validate_json(cached["raw_json"]), self._blank_usage(True)
 
-        estimated = count_call(
-            system=system, user=question, schema_json=schema_json, provider=self.provider.name
-        ).tokens
+        if self.cache_only:
+            raise CacheMiss(
+                f"cache-only client has no stored response for {output_format.__name__} "
+                f"on {question[:60]!r}"
+            )
+        estimated = self._budget_estimate(
+            count_call(
+                system=system,
+                user=question,
+                schema_json=schema_json,
+                provider=self.provider.name,
+            ).tokens
+        )
         parsed, usage = self._dispatch(
             Prompt(system=system, user=question), output_format, estimated
         )
@@ -328,9 +361,15 @@ class LlmClient:
             cached = json.loads(path.read_text(encoding="utf-8"))
             return str(cached["raw_json"]), self._blank_usage(True)
 
-        estimated = count_call(
-            system=system, user=question, schema_json="", provider=self.provider.name
-        ).tokens
+        if self.cache_only:
+            raise CacheMiss(
+                f"cache-only client has no stored free-text response for {question[:60]!r}"
+            )
+        estimated = self._budget_estimate(
+            count_call(
+                system=system, user=question, schema_json="", provider=self.provider.name
+            ).tokens
+        )
         parsed, usage = self._dispatch(Prompt(system=system, user=question), None, estimated)
         text = parsed.text if isinstance(parsed, TextResponse) else str(parsed)
         if self.use_cache:

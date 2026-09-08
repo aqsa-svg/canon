@@ -38,6 +38,7 @@ from benchmark.harness.score import (
     gold_collision_report,
     paired_discrimination,
     rows_match,
+    shape_matches,
 )
 from canon.agent.llm import CallContext, LlmClient
 from canon.agent.pipeline import CanonPipeline, PipelineResult
@@ -95,6 +96,10 @@ class Provenance(BaseModel):
 
     completed_units: int = 0
     expected_units: int = 0
+
+    scored_questions: int = 0
+    """Questions in the balanced subset every arm answered. Equals question_count only on
+    a complete run."""
 
 
 TUNING_RESULT = REPO_ROOT / "benchmark" / "dev" / "tuning_result.json"
@@ -209,17 +214,74 @@ def _load_checkpoint(path: Path) -> dict[str, QuestionScore]:
     return done
 
 
-def _append_checkpoint(path: Path, item: WorkItem, score: QuestionScore) -> None:
+def _append_checkpoint(path: Path, item: WorkItem, score: QuestionScore, provider: str) -> None:
     """Write one result immediately.
 
     After every question rather than at the end: a session that dies to quota, a network
     drop, or a keyboard interrupt must lose at most the question in flight.
+
+    The provider is recorded per unit so a later resume can prove the whole checkpoint
+    came from one backend.
     """
     record = score.model_dump(mode="json")
     record["_system"] = item.system
     record["_run_index"] = item.run_index
+    record["_provider"] = provider
     with path.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(record, sort_keys=True) + "\n")
+
+
+def _checkpoint_providers(path: Path) -> set[str]:
+    """Every provider that appears in an existing checkpoint.
+
+    More than one means the file already mixes backends and nothing in it is scoreable.
+    Units written before this field existed report as 'unrecorded'.
+    """
+    if not path.exists():
+        return set()
+    seen: set[str] = set()
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if line.strip():
+            seen.add(json.loads(line).get("_provider", "unrecorded"))
+    return seen
+
+
+def provider_conflict(checkpoint_path: Path, provider: str) -> str | None:
+    """Why this checkpoint must not be extended on ``provider``, or None if it is safe.
+
+    A tag is bound to whichever provider first wrote to it. Mixing two backends inside one
+    comparison would make the delta between Canon and the baseline measure the backend
+    rather than the architecture, and the mixing would be invisible in the report -- so it
+    is refused up front rather than detected afterwards.
+
+    Extracted from main() so it can be tested without credentials for a second provider.
+    """
+    existing = _checkpoint_providers(checkpoint_path)
+    known = existing - {"unrecorded"}
+
+    if len(known) > 1:
+        return (
+            f"REFUSING TO RUN: checkpoint {checkpoint_path} already mixes providers "
+            f"({', '.join(sorted(known))}). Nothing in it is scoreable."
+        )
+
+    foreign = known - {provider}
+    if foreign:
+        return (
+            f"REFUSING TO RUN: checkpoint {checkpoint_path} contains units from "
+            f"{', '.join(sorted(foreign))}, and this run is on {provider!r}. Mixing "
+            "providers inside one comparison would make the delta measure the backend "
+            f"rather than the architecture. Use a different --tag for {provider}."
+        )
+
+    if "unrecorded" in existing and known != {provider}:
+        return (
+            f"REFUSING TO RUN: checkpoint {checkpoint_path} has units written before the "
+            "provider was recorded, so it cannot be proven to be "
+            f"{provider!r}. Re-run under a fresh --tag, or backfill _provider if you know "
+            "which backend produced them."
+        )
+    return None
 
 
 def _git(*args: str) -> str:
@@ -304,9 +366,11 @@ def score_canon(
     actual = answer.answer_value.rows if answer.answer_value else ()
 
     value_correct: bool | None = None
+    shape_correct: bool | None = None
     if question.expected_behavior is Behavior.ANSWER and question.id in gold:
         expected = tuple(tuple(row) for row in gold[question.id])
         value_correct = rows_match(question, actual, expected)
+        shape_correct = shape_matches(question, actual, expected)
 
     metric_correct = metric_used == question.expected_metric if question.expected_metric else None
     caveat_text = " ".join(caveat.text for caveat in answer.caveats)
@@ -315,6 +379,7 @@ def score_canon(
     score = QuestionScore(
         outcome=Outcome.ANSWERED,
         value_correct=value_correct,
+        shape_correct=shape_correct,
         metric_correct=metric_correct,
         metric_used=metric_used,
         refusal_correct=question.expected_behavior.should_answer,
@@ -391,14 +456,17 @@ def score_baseline(
         )
 
     value_correct: bool | None = None
+    shape_correct: bool | None = None
     if question.expected_behavior is Behavior.ANSWER and question.id in gold:
         expected = tuple(tuple(row) for row in gold[question.id])
         value_correct = rows_match(question, output.rows, expected)
+        shape_correct = shape_matches(question, output.rows, expected)
 
     attribution = attribute_wrong_answer(output.rows, question.id, gold, questions)
     score = QuestionScore(
         outcome=Outcome.ANSWERED,
         value_correct=value_correct,
+        shape_correct=shape_correct,
         metric_correct=None,
         metric_used=None,
         refusal_correct=question.expected_behavior.should_answer,
@@ -503,18 +571,24 @@ def main() -> int:
     if done:
         print(f"resuming: {len(done)} units already complete in {checkpoint_path.name}")
 
+    refusal = provider_conflict(checkpoint_path, provenance_client.name)
+    if refusal is not None:
+        print(refusal)
+        return 3
+
     systems = (
         ["baseline", "canon"]
         if args.system == "both"
         else ["canon" if args.system == "canon" else "baseline"]
     )
-    # Baseline first: it costs about a seventh of Canon per question, so on a
-    # constrained day it finishes and leaves one comparison arm whole.
+    # Interleaved by question, so a quota stop leaves N complete question-pairs rather
+    # than one whole arm and a stub of the other. The Groq run ordered baseline-first and
+    # its day-1 stop left 80/80 against 4/80 -- two arms, nothing comparable.
     work: list[WorkItem] = [
         WorkItem(system=system, run_index=run_index, question_id=question.id)
-        for system in systems
         for run_index in range(args.runs)
         for question in selected
+        for system in systems
     ]
     expected_units = len(work)
     pending = [item for item in work if item.key not in done]
@@ -574,7 +648,7 @@ def main() -> int:
                 break
 
             done[item.key] = score
-            _append_checkpoint(checkpoint_path, item, score)
+            _append_checkpoint(checkpoint_path, item, score, provenance_client.name)
             print(
                 f"[{item.system} r{item.run_index} {position}/{len(pending)}] "
                 f"{item.question_id:8} {score.outcome.value:8} "
@@ -590,30 +664,53 @@ def main() -> int:
     all_scores: dict[str, list[QuestionScore]] = {}
     per_run: dict[str, list[list[QuestionScore]]] = {}
 
-    # Only assemble arms that are whole. A tier with missing questions is not averaged:
-    # a truncated run is incomplete, not a smaller result.
-    for system in systems:
-        runs: list[list[QuestionScore]] = []
-        for run_index in range(args.runs):
-            scores = [
-                done[WorkItem(system=system, run_index=run_index, question_id=q.id).key]
-                for q in selected
-                if WorkItem(system=system, run_index=run_index, question_id=q.id).key in done
-            ]
-            if len(scores) == len(selected):
-                runs.append(scores)
-            elif scores:
-                print(
-                    f"  {system} run {run_index}: {len(scores)}/{len(selected)} questions "
-                    "-- INCOMPLETE, excluded from the report"
+    # Score the BALANCED subset: questions every system and run answered. Interleaving
+    # makes that subset meaningful -- both arms cover the same questions, so the delta is
+    # a real comparison rather than two different samples.
+    #
+    # It is still not a complete run. Provenance records complete=false whenever the
+    # subset is smaller than the selection, and RESULTS.md publishes only complete arms;
+    # this exists so a stopped run can be inspected, not quoted.
+    balanced = [
+        question
+        for question in selected
+        if all(
+            WorkItem(system=system, run_index=run_index, question_id=question.id).key in done
+            for system in systems
+            for run_index in range(args.runs)
+        )
+    ]
+    if len(balanced) < len(selected):
+        complete = False
+        missing_per_tier: dict[str, int] = {}
+        for question in selected:
+            if question not in balanced:
+                missing_per_tier[question.tier.value] = (
+                    missing_per_tier.get(question.tier.value, 0) + 1
                 )
-                complete = False
-        if runs:
+        print(
+            f"\n  balanced subset: {len(balanced)}/{len(selected)} questions answered by "
+            f"every arm. Missing per tier: {missing_per_tier}"
+        )
+        print("  the report covers that subset only and is stamped INCOMPLETE")
+
+    scoreable = QuestionSet(questions=tuple(balanced)) if balanced else None
+    if scoreable is not None:
+        for system in systems:
+            runs = [
+                [
+                    done[WorkItem(system=system, run_index=run_index, question_id=q.id).key]
+                    for q in balanced
+                ]
+                for run_index in range(args.runs)
+            ]
             per_run[system] = runs
             all_scores[system] = runs[0]
-            aggregates.append(aggregate(system, runs[0], subset))
-        else:
-            complete = False
+            aggregates.append(aggregate(system, runs[0], scoreable))
+        subset = scoreable
+    else:
+        complete = False
+        print("\n  no question has been answered by every arm yet; nothing to score")
 
     completed_units = len(done)
     provenance = provenance.model_copy(
@@ -621,6 +718,7 @@ def main() -> int:
             "complete": complete and completed_units == expected_units,
             "completed_units": completed_units,
             "expected_units": expected_units,
+            "scored_questions": len(balanced),
         }
     )
 

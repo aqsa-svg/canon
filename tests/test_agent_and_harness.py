@@ -17,6 +17,7 @@ from pathlib import Path
 import pytest
 
 from benchmark.harness.dataset import Behavior, QuestionSet, Tier, load_questions
+from benchmark.harness.run import provider_conflict
 from benchmark.harness.score import (
     Attribution,
     Outcome,
@@ -32,6 +33,7 @@ from benchmark.harness.score import (
     order_matters,
     paired_discrimination,
     rows_match,
+    shape_matches,
 )
 from canon.agent.policy import (
     PolicyOutcome,
@@ -884,3 +886,110 @@ class TestGoldAgreesWithTheCards:
                         "which the gold SQL does not mention"
                     )
         assert not problems, "gold does not compute the card:\n  " + "\n  ".join(problems)
+
+
+class TestShapeAccuracy:
+    """shape_correct separates "asked for the wrong thing" from "wrong definition".
+
+    Exact-value equality scores those identically, which hides the finding: the baseline
+    almost always gets the shape right and the value wrong.
+    """
+
+    def _q(self, questions, question_id: str):  # noqa: ANN202 - test helper
+        return next(item for item in questions.questions if item.id == question_id)
+
+    def test_right_shape_wrong_value_is_shape_correct(self, questions) -> None:
+        """The whole point: a missing default filter is not a wrong question."""
+        question = self._q(questions, "t1-01")  # scalar money
+        gold = ((Decimal("7341182.41"),),)
+        wrong_value = ((Decimal("8699763.05"),),)  # what the baseline actually returned
+        assert not rows_match(question, wrong_value, gold)
+        assert shape_matches(question, wrong_value, gold) is True
+
+    def test_a_scalar_answered_as_a_series_is_not_shape_correct(self, questions) -> None:
+        question = self._q(questions, "t1-01")
+        gold = ((Decimal("1"),),)
+        series = ((date(2018, 1, 1), Decimal("1")), (date(2018, 2, 1), Decimal("2")))
+        assert shape_matches(question, series, gold) is False
+
+    def test_a_series_answered_as_a_scalar_is_not_shape_correct(self, questions) -> None:
+        question = self._q(questions, "t2-01")
+        gold = ((date(2018, 1, 1), Decimal("1")), (date(2018, 2, 1), Decimal("2")))
+        assert shape_matches(question, ((Decimal("3"),),), gold) is False
+
+    def test_a_series_may_span_a_different_number_of_buckets(self, questions) -> None:
+        """A different filter legitimately changes how many groups exist."""
+        question = self._q(questions, "t2-01")
+        gold = tuple((date(2018, month, 1), Decimal("1")) for month in range(1, 10))
+        ten = tuple((date(2018, month, 1), Decimal("1")) for month in range(1, 11))
+        assert shape_matches(question, ten, gold) is True
+
+    def test_an_order_of_magnitude_row_count_is_a_grouping_error(self, questions) -> None:
+        question = self._q(questions, "t2-01")
+        gold = tuple((date(2018, month, 1), Decimal("1")) for month in range(1, 10))
+        many = tuple((date(2018, 1, 1), Decimal("1")) for _ in range(500))
+        assert shape_matches(question, many, gold) is False
+
+    def test_a_comparison_ignores_the_key_convention(self, questions) -> None:
+        """Consistent with rows_match: the label column is a convention, not an answer."""
+        question = self._q(questions, "t2-07")
+        gold = (("current", Decimal("981051.06")), ("comparison", Decimal("837895.43")))
+        month_keyed = (
+            (date(2018, 2, 1), Decimal("992463.34")),
+            (date(2018, 3, 1), Decimal("1159652.12")),
+        )
+        assert shape_matches(question, month_keyed, gold) is True
+
+    def test_no_rows_is_never_shape_correct(self, questions) -> None:
+        question = self._q(questions, "t1-01")
+        assert shape_matches(question, (), ((Decimal("1"),),)) is False
+
+
+class TestProviderGuard:
+    """A tag is bound to one provider. Mixing backends inside one comparison is refused."""
+
+    def _checkpoint(self, tmp_path: Path, providers: list[str]) -> Path:
+        path = tmp_path / "checkpoint.jsonl"
+        with path.open("w", encoding="utf-8") as handle:
+            for index, provider in enumerate(providers):
+                handle.write(
+                    json.dumps(
+                        {
+                            "question_id": f"q-{index}",
+                            "_system": "canon",
+                            "_run_index": 0,
+                            "_provider": provider,
+                        }
+                    )
+                    + "\n"
+                )
+        return path
+
+    def test_same_provider_is_allowed(self, tmp_path: Path) -> None:
+        path = self._checkpoint(tmp_path, ["groq", "groq"])
+        assert provider_conflict(path, "groq") is None
+
+    def test_a_foreign_provider_is_refused(self, tmp_path: Path) -> None:
+        """Resuming a Groq tag on Gemini would make the delta measure the backend."""
+        path = self._checkpoint(tmp_path, ["groq", "groq"])
+        message = provider_conflict(path, "gemini")
+        assert message is not None
+        assert "groq" in message and "gemini" in message
+
+    def test_an_already_mixed_checkpoint_is_refused(self, tmp_path: Path) -> None:
+        path = self._checkpoint(tmp_path, ["groq", "gemini"])
+        message = provider_conflict(path, "groq")
+        assert message is not None
+        assert "mixes providers" in message
+
+    def test_an_absent_checkpoint_is_fine(self, tmp_path: Path) -> None:
+        assert provider_conflict(tmp_path / "nothing.jsonl", "groq") is None
+
+    def test_unrecorded_units_cannot_be_claimed_for_a_provider(self, tmp_path: Path) -> None:
+        """Units written before the field existed cannot be proven to be anything."""
+        path = tmp_path / "checkpoint.jsonl"
+        path.write_text(
+            json.dumps({"question_id": "q", "_system": "canon", "_run_index": 0}) + "\n",
+            encoding="utf-8",
+        )
+        assert provider_conflict(path, "groq") is not None

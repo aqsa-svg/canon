@@ -6,7 +6,7 @@ model's metric scores), and every executed result passes through ``verify`` befo
 number is reported.
 """
 
-from canon.agent.llm import MODEL_ID, LlmClient, LlmError, Usage
+from canon.agent.llm import MODEL_ID, CacheMiss, LlmClient, LlmError, Usage
 from canon.agent.pipeline import CanonPipeline, PipelineResult
 from canon.agent.policy import PolicyOutcome, PolicyRule, PolicyThresholds, RefusalDecision
 from canon.agent.prompt import DataWindow, build_system_prompt
@@ -14,6 +14,7 @@ from canon.agent.verify import VerificationFailure, VerificationReport, verify
 
 __all__ = [
     "MODEL_ID",
+    "CacheMiss",
     "CanonPipeline",
     "DataWindow",
     "LlmClient",
