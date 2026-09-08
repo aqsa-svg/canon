@@ -1,0 +1,56 @@
+{
+  "actual_per_tier": {
+    "1": 6,
+    "2": 6,
+    "3": 6,
+    "ambiguous": 6
+  },
+  "deliberate_oversampling": "Every paired-discrimination item is force-included even where that skews tier proportions away from 6/6/6/6. Those pairs are the only reflex-immune metric in the suite -- each half looks like the other and requires the opposite response -- so an ablation blind to them loses its most interesting comparison. The skew is recorded here rather than hidden: read per-tier ablation numbers as covering these questions, not a uniform sample of the tier.",
+  "force_included_pairs": [
+    {
+      "left": "t3-08",
+      "pair": "avg_order_value grain",
+      "right": "am-13"
+    },
+    {
+      "left": "t2-12",
+      "pair": "payment_type fan-out",
+      "right": "am-14"
+    },
+    {
+      "left": "t3-02",
+      "pair": "reported_revenue restatement caveat",
+      "right": "t3-03"
+    }
+  ],
+  "purpose": "full-stuffing vs two-stage ablation on a stratified subset",
+  "questions": [
+    "am-01",
+    "am-02",
+    "am-03",
+    "am-04",
+    "am-13",
+    "am-14",
+    "t1-01",
+    "t1-02",
+    "t1-03",
+    "t1-04",
+    "t1-05",
+    "t1-06",
+    "t2-01",
+    "t2-02",
+    "t2-03",
+    "t2-04",
+    "t2-05",
+    "t2-12",
+    "t3-01",
+    "t3-02",
+    "t3-03",
+    "t3-04",
+    "t3-05",
+    "t3-08"
+  ],
+  "status": "QUEUED -- not run. Requires quota the headline sweep is currently using.",
+  "target": "6 per tier",
+  "total": 24
+}
