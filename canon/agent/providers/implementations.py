@@ -437,6 +437,16 @@ _RETRYABLE_MARKERS = (
     "timeout",
     "500",
     "request too large",  # Groq returns 413 for a per-minute token overage
+    # Transport failures. Not the model's doing and not reproducible, so a retry is the
+    # right response rather than recording a permanent error.
+    "connection error",
+    "apiconnectionerror",
+    "dll load failed",
+    "application control policy",
+    "ssl",
+    "temporarily unavailable",
+    "connection reset",
+    "connection aborted",
 )
 """Substrings that mean "try again later".
 
@@ -468,6 +478,33 @@ def _normalise(error: Exception) -> ProviderError:
     return ProviderError(
         text, retryable=retryable, status=status if isinstance(status, int) else None
     )
+
+
+_TRANSPORT_MARKERS = (
+    "connection error",
+    "apiconnectionerror",
+    "dll load failed",
+    "application control policy",
+    "ssl",
+    "connection reset",
+    "connection aborted",
+    "temporarily unavailable",
+    "name or service not known",
+)
+"""Signatures of a failure in the machine rather than in the model.
+
+Kept separate from the retryable list because the two answer different questions.
+Retryable asks "try again now?"; transport asks "should this unit be re-attempted on the
+next run, or has the system under test genuinely failed?" A schema rejection is retryable
+in neither sense and is a real finding; a blocked SSL library is neither a finding nor
+reproducible.
+"""
+
+
+def is_transport_error(message: str) -> bool:
+    """Whether a recorded error came from the environment rather than the model."""
+    lowered = message.lower()
+    return any(marker in lowered for marker in _TRANSPORT_MARKERS)
 
 
 def retry_after_seconds(error: ProviderError) -> float | None:

@@ -27,6 +27,7 @@ from canon.agent.providers.implementations import (
     AnthropicProvider,
     GeminiProvider,
     GroqProvider,
+    is_transport_error,
     retry_after_seconds,
 )
 from canon.agent.providers.quota import (
@@ -120,6 +121,7 @@ __all__ = [
     "count_call",
     "count_tokens",
     "is_free_tier",
+    "is_transport_error",
     "load_config",
     "project",
     "retry_after_seconds",

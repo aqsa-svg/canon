@@ -43,7 +43,12 @@ from benchmark.harness.score import (
 from canon.agent.llm import CallContext, LlmClient
 from canon.agent.pipeline import CanonPipeline, PipelineResult
 from canon.agent.policy import PolicyThresholds
-from canon.agent.providers import DEFAULT_PROVIDER, QuotaExhausted, is_free_tier
+from canon.agent.providers import (
+    DEFAULT_PROVIDER,
+    QuotaExhausted,
+    is_free_tier,
+    is_transport_error,
+)
 from canon.semantic.loader import load_semantic_layer, semantic_layer_hash
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -197,6 +202,12 @@ def _load_checkpoint(path: Path) -> dict[str, QuestionScore]:
 
     Keyed by system, run index and question id, so resuming re-does nothing and the
     quota spent yesterday is not spent again.
+
+    **Transport failures are deliberately NOT loaded**, so they become pending again and
+    are re-attempted. A blocked SSL library or a dropped connection says nothing about the
+    system under test, and freezing it as a permanent error understates the arm for a
+    reason that is not about the architecture. A schema rejection or a model failure IS
+    kept, because that is a finding.
     """
     if not path.exists():
         return {}
@@ -205,6 +216,8 @@ def _load_checkpoint(path: Path) -> dict[str, QuestionScore]:
         if not line.strip():
             continue
         record = json.loads(line)
+        if record.get("outcome") == "errored" and is_transport_error(record.get("error") or ""):
+            continue
         item = WorkItem(
             system=record["_system"],
             run_index=record["_run_index"],
@@ -671,6 +684,10 @@ def main() -> int:
     # It is still not a complete run. Provenance records complete=false whenever the
     # subset is smaller than the selection, and RESULTS.md publishes only complete arms;
     # this exists so a stopped run can be inspected, not quoted.
+    # A re-attempted transport failure leaves two lines for the same key; `done` already
+    # holds the later one because the file is read in order and the retry is appended
+    # last. Nothing else to do, but stated because a duplicated key is easy to misread as
+    # a double count.
     balanced = [
         question
         for question in selected

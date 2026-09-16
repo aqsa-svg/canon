@@ -17,7 +17,7 @@ from pathlib import Path
 import pytest
 
 from benchmark.harness.dataset import Behavior, QuestionSet, Tier, load_questions
-from benchmark.harness.run import provider_conflict
+from benchmark.harness.run import _load_checkpoint, provider_conflict
 from benchmark.harness.score import (
     Attribution,
     Outcome,
@@ -43,6 +43,7 @@ from canon.agent.policy import (
     log_decision,
 )
 from canon.agent.prompt import DataWindow, build_system_prompt
+from canon.agent.providers import is_transport_error
 from canon.agent.verify import VerificationFailure, verify
 from canon.compiler import CompiledQuery, QueryPlan, compile_intent, validate_intent
 from canon.schemas.decision import AgentDecision, MetricCandidate
@@ -993,3 +994,89 @@ class TestProviderGuard:
             encoding="utf-8",
         )
         assert provider_conflict(path, "groq") is not None
+
+
+class TestTransportErrorsAreNotFindings:
+    """A blocked DLL says nothing about the architecture; a schema rejection does.
+
+    Two tier-2 answerable questions were lost to the environment rather than to the
+    system under test -- one to APIConnectionError and one to a Windows Application
+    Control policy blocking the _ssl module. Freezing those as permanent errors
+    understates the arm for a reason that is not about the design.
+    """
+
+    def test_a_dropped_connection_is_transport(self) -> None:
+        assert is_transport_error("APIConnectionError: Connection error.")
+
+    def test_a_blocked_ssl_library_is_transport(self) -> None:
+        assert is_transport_error(
+            "ImportError: DLL load failed while importing _ssl: An Application Control "
+            "policy has blocked this file."
+        )
+
+    def test_a_schema_rejection_is_not_transport(self) -> None:
+        """This one is a real finding about the harness and must stay recorded."""
+        assert not is_transport_error(
+            "BadRequestError: Error code: 400 - Tool call validation failed: "
+            "`/candidates`: minimum 1 items required, but found 0 items"
+        )
+
+    def test_a_throttle_is_not_transport(self) -> None:
+        """Retryable, but a property of the quota rather than of the machine."""
+        assert not is_transport_error(
+            "Request too large ... on tokens per minute (TPM): Limit 8000, Requested 8092"
+        )
+
+    def test_a_transport_failure_is_reattempted_on_resume(self, tmp_path: Path) -> None:
+        """It must not be loaded as done, so the work list picks it up again."""
+        path = tmp_path / "checkpoint.jsonl"
+        lines = [
+            {
+                "question_id": "t2-14",
+                "question": "q",
+                "tier": "2",
+                "expected_behavior": "answer",
+                "outcome": "errored",
+                "error": "APIConnectionError: Connection error.",
+                "_system": "canon",
+                "_run_index": 0,
+                "_provider": "groq",
+            },
+            {
+                "question_id": "am-18",
+                "question": "q",
+                "tier": "ambiguous",
+                "expected_behavior": "refuse",
+                "outcome": "errored",
+                "error": "BadRequestError: 400 - `/candidates`: minimum 1 items required",
+                "_system": "canon",
+                "_run_index": 0,
+                "_provider": "groq",
+            },
+        ]
+        path.write_text("\n".join(json.dumps(item) for item in lines) + "\n", encoding="utf-8")
+        done = _load_checkpoint(path)
+
+        assert "canon|0|t2-14" not in done, "a transport failure must be retried"
+        assert "canon|0|am-18" in done, "a schema rejection is a finding and stays recorded"
+
+    def test_a_successful_unit_is_always_loaded(self, tmp_path: Path) -> None:
+        path = tmp_path / "checkpoint.jsonl"
+        path.write_text(
+            json.dumps(
+                {
+                    "question_id": "t1-01",
+                    "question": "q",
+                    "tier": "1",
+                    "expected_behavior": "answer",
+                    "outcome": "answered",
+                    "value_correct": True,
+                    "_system": "canon",
+                    "_run_index": 0,
+                    "_provider": "groq",
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        assert "canon|0|t1-01" in _load_checkpoint(path)
