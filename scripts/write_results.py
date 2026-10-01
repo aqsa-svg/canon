@@ -379,7 +379,7 @@ def main() -> int:
     OUTPUT.write_text("\n".join(lines), encoding="utf-8")
     print(f"wrote {OUTPUT.relative_to(REPO_ROOT)} ({len(lines)} lines)")
     if not complete:
-        print("STAMPED INCOMPLETE — the numbers are provisional and must not be quoted.")
+        print("STAMPED INCOMPLETE: the numbers are provisional and must not be quoted.")
         return 2
     return 0
 
