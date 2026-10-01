@@ -7,6 +7,7 @@ never become syntax.
 
 from __future__ import annotations
 
+import json
 from datetime import date
 
 import pytest
@@ -15,6 +16,7 @@ from sqlglot import exp
 
 from canon.compiler import compile_intent, validate_intent
 from canon.schemas.answer import Answer, AnswerValue, ResultColumn
+from canon.schemas.decision import AgentDecision
 from canon.schemas.errors import InvalidIntent, InvalidIntentReason
 from canon.schemas.intent import (
     Comparison,
@@ -512,3 +514,40 @@ class TestComparison:
         )
         text = " ".join(caveat.text for caveat in compiled.caveats)
         assert "2018-02-01" in text and "2018-03-01" in text
+
+
+class TestSortSpecTolerance:
+    """Strictness that discards a well-formed intent is pedantry, not safety.
+
+    Asked "which customer states had the worst late delivery rate?", the model returned
+    target=metric with dimension=customer_state -- sort by the metric, with the breakdown
+    named redundantly. The meaning is unambiguous. The stricter validator rejected it and
+    the question was lost to a hard error (t2-14 in sweep-groq-r1).
+    """
+
+    def test_a_redundant_dimension_is_dropped_not_fatal(self) -> None:
+        spec = SortSpec.model_validate(
+            {"target": "metric", "dimension": "customer_state", "direction": "desc"}
+        )
+        assert spec.target is SortTarget.METRIC
+        assert spec.dimension is None, "the redundant value is dropped, not honoured"
+
+    def test_a_dimension_sort_still_requires_its_dimension(self) -> None:
+        """The genuine error is still an error."""
+        with pytest.raises(ValueError, match="requires naming it"):
+            SortSpec.model_validate({"target": "dimension", "direction": "asc"})
+
+    def test_a_dimension_sort_keeps_its_dimension(self) -> None:
+        spec = SortSpec.model_validate(
+            {"target": "dimension", "dimension": "customer_state", "direction": "asc"}
+        )
+        assert spec.dimension is not None
+
+    def test_the_wire_schema_is_unchanged_by_the_relaxation(self) -> None:
+        """The rule lives in a model_validator, so the response cache stays valid.
+
+        If this ever appears in the JSON schema, relaxing it would invalidate every
+        cached response and cost a full re-run.
+        """
+        schema = json.dumps(AgentDecision.model_json_schema(), sort_keys=True)
+        assert "must not name a dimension" not in schema

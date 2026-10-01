@@ -171,12 +171,33 @@ class SortSpec(BaseModel):
     dimension: DimensionName | None = None
     """Required when ``target`` is ``dimension``, forbidden otherwise."""
 
+    @model_validator(mode="before")
+    @classmethod
+    def _drop_redundant_dimension(cls, data: object) -> object:
+        """Ignore a dimension named alongside a non-dimension sort target.
+
+        Asked "which customer states had the worst late delivery rate?", the model
+        returned target=metric AND dimension=customer_state -- sort by the metric,
+        descending, with the breakdown named redundantly. The meaning is unambiguous, and
+        the stricter version of this validator rejected it outright, losing the question
+        to a hard error.
+
+        A redundant field is not an ambiguity. Strictness earns its place where it catches
+        confusion (`extra="forbid"` turning a YAML typo into a loud failure); it does not
+        earn its place when it discards a well-formed intent for tidiness. The redundant
+        value is dropped rather than honoured, so the sort does what the target says.
+        """
+        if isinstance(data, dict):
+            target = data.get("target")
+            target_value = getattr(target, "value", target)
+            if target_value != SortTarget.DIMENSION.value and data.get("dimension") is not None:
+                data = {key: value for key, value in data.items() if key != "dimension"}
+        return data
+
     @model_validator(mode="after")
     def _check_dimension(self) -> SortSpec:
         if self.target is SortTarget.DIMENSION and self.dimension is None:
             raise ValueError("sorting by a dimension requires naming it")
-        if self.target is not SortTarget.DIMENSION and self.dimension is not None:
-            raise ValueError(f"sort target {self.target.value} must not name a dimension")
         return self
 
 
