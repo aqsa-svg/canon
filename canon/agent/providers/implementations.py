@@ -490,6 +490,13 @@ _TRANSPORT_MARKERS = (
     "connection aborted",
     "temporarily unavailable",
     "name or service not known",
+    # Free-tier quota ceilings. A per-minute token overage means this machine's rate
+    # limiter mis-estimated the request against Groq's 8000 TPM cap; the model never saw
+    # the question. Freezing it as a permanent error would charge Canon for an arithmetic
+    # error in the harness, on a question the system under test never got to answer.
+    "rate_limit_exceeded",
+    "request too large",
+    "tokens per minute",
 )
 """Signatures of a failure in the machine rather than in the model.
 

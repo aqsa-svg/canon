@@ -1021,9 +1021,17 @@ class TestTransportErrorsAreNotFindings:
             "`/candidates`: minimum 1 items required, but found 0 items"
         )
 
-    def test_a_throttle_is_not_transport(self) -> None:
-        """Retryable, but a property of the quota rather than of the machine."""
-        assert not is_transport_error(
+    def test_a_quota_overage_is_transport(self) -> None:
+        """Reverses an earlier call in this file, which had it the other way round.
+
+        The first reading was that a throttle is "a property of the quota rather than of
+        the machine", so not transport. That confuses whose fault it is with whether it
+        is a finding. The limiter estimated 8092 tokens against a 8000 cap and the model
+        never saw the question, so the system under test did not fail; the arithmetic in
+        this repo did. am-08 was frozen as a permanent error on exactly that basis and
+        charged to Canon's error rate.
+        """
+        assert is_transport_error(
             "Request too large ... on tokens per minute (TPM): Limit 8000, Requested 8092"
         )
 

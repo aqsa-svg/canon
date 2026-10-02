@@ -6,13 +6,13 @@ Generated from `benchmark/runs/sweep-groq-r1/report.json` by `scripts/write_resu
 
 | Field | Value |
 |---|---|
-| started_at | `2026-10-01T16:22:01.840510+00:00` |
+| started_at | `2026-10-02T05:59:02.173122+00:00` |
 | provider | `groq` |
 | model_id | `openai/gpt-oss-120b` |
 | provider_config_hash | `72af3a5ba084b045` |
 | free_tier | `True` |
 | effort | `medium` |
-| code_commit | `0f1df89` |
+| code_commit | `f490b7e` |
 | eval_set_commit | `df52cc6` |
 | metrics_yaml_sha256 | `2bd082e4f63ef301f1c9afb00d2efb8f9913c0662b2d088dd4957b041a5ce9f0` |
 | confident_threshold | `0.7` |
@@ -33,14 +33,14 @@ Generated from `benchmark/runs/sweep-groq-r1/report.json` by `scripts/write_resu
 | Execution accuracy | answerable | 90.9% | 32.7% | +58.2pp ✓ |
 | Shape accuracy (columns + grain) | answerable | 98.1% | 96.4% | +1.7pp ✓ |
 | **Semantic accuracy** | answerable, measurable | 100.0% | n/a | n/a |
-| Behaviour accuracy (3x3 diagonal) | all | 87.5% | 72.5% | +15.0pp ✓ |
-| Refusal accuracy (ask vs answer) | all | 90.0% | 31.2% | +58.8pp ✓ |
+| Behaviour accuracy (3x3 diagonal) | all | 88.8% | 72.5% | +16.2pp ✓ |
+| Refusal accuracy (ask vs answer) | all | 91.2% | 31.2% | +60.0pp ✓ |
 | — under-refusal rate | should-not-answer | 0.0% | 72.0% | -72.0pp ✓ |
 | — over-refusal rate | answerable | 5.5% | 0.0% | +5.5pp ✗ |
-| — names the fork (proxy) | should-not-answer | 68.2% | 42.9% | +25.3pp ✓ |
+| — names the fork (proxy) | should-not-answer | 69.6% | 42.9% | +26.7pp ✓ |
 | Caveat surfaced | cases requiring one | 87.5% | n/a | n/a |
 | Confident-wrong rate [1] | all | 2.5% | 68.8% | -66.2pp ✓ |
-| Error rate | all | 3.8% | 0.0% | +3.8pp ✗ |
+| Error rate | all | 2.5% | 0.0% | +2.5pp ✗ |
 
 **Silent-wrong** is the headline safety number: a wrong answer handed over with neither a verification flag nor a clarifying question attached. It compares what each system observably did, so it needs no assumption about confidence.
 
@@ -55,7 +55,7 @@ Generated from `benchmark/runs/sweep-groq-r1/report.json` by `scripts/write_resu
 | System | silent wrong | gate-flagged | declined to answer |
 |---|---|---|---|
 | baseline | 55 | 0 | 7 |
-| canon | 2 | 1 | 22 |
+| canon | 2 | 1 | 23 |
 
 The baseline's zeros are structural — it has no verification gate — which is the finding rather than a scoring artefact.
 
@@ -70,7 +70,7 @@ The baseline's zeros are structural — it has no verification gate — which is
 | canon | 1 | 20 | 90.0% | 100.0% | 100.0% | 90.0% | 0.0% |
 | canon | 2 | 20 | 85.0% | 94.7% | 100.0% | 95.0% | 10.0% |
 | canon | 3 | 15 | 100.0% | 100.0% | 100.0% | 100.0% | 0.0% |
-| canon | ambiguous | 25 | n/a | n/a | n/a | 72.0% | 0.0% |
+| canon | ambiguous | 25 | n/a | n/a | n/a | 76.0% | 0.0% |
 
 ## Behaviour matrix (3x3)
 
@@ -94,7 +94,7 @@ Not collapsed to 2x2, because the off-diagonals are different failures:
 | target ↓ / actual → | answer | clarify | refuse | error |
 |---|---|---|---|---|
 | **answer** | 52 | 3 | 0 | 0 |
-| **clarify** | 0 | 15 | 1 | 1 |
+| **clarify** | 0 | 16 | 1 | 0 |
 | **refuse** | 0 | 3 | 3 | 2 |
 
 ## Paired discrimination

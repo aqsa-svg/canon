@@ -3,10 +3,11 @@
 Every failure read individually, from the per-question records in
 `benchmark/runs/*/checkpoint.jsonl` and `decisions.jsonl` — not summarised from scores.
 
-**Status: IN PROGRESS.** The baseline arm is complete (80/80). The Canon arm is not, so
-every Canon *count* below is `TBD` and will be filled by reading each failed unit once the
-arm is whole. Individual cases named here are verified against the checkpoint and cited by
-question id; aggregate rates live only in
+**Status: COMPLETE.** Both arms are whole (80/80 each, 160/160 units) and every Canon
+failure below was read individually from its own record — SQL re-executed against the
+warehouse where the diagnosis depended on it. Seven Canon units fail in total. Individual
+cases are verified against the checkpoint and cited by question id; aggregate rates live
+only in
 [`benchmark/RESULTS.md`](../benchmark/RESULTS.md), per the number rule in `CLAUDE.md`.
 
 The most credible section of this document is the last one, and the second-most credible is
@@ -75,7 +76,8 @@ read with it in mind.
 
 ### A3. A transient provider throttle was classified as permanent
 
-**Count: 1** (`am-08`). Verified from the preserved error.
+**Count: 0 in the published run — 1 before the fix** (`am-08`). Verified from the
+preserved error.
 
 Groq refused with HTTP 413, code `rate_limit_exceeded`: *"on tokens per minute (TPM): Limit
 8000, Requested 8092"*. Neither 413 nor the underscored code matched the retryable-error
@@ -85,8 +87,19 @@ Root cause was mine twice over: the local token estimate ran 2% under Groq's own
 (6,914 against 7,035 across 36 calls), which under-books the per-minute bucket until the
 drift trips the provider's limiter. **Both fixed** — 413 and `rate_limit` are now
 retryable, and the limiter pads estimates by 10%, deliberately more than the measured 2%
-because under-booking loses a question while over-booking only wastes headroom. The fix
-lands for future runs; `am-08` remains an error in this one.
+because under-booking loses a question while over-booking only wastes headroom.
+
+**A third fix, and a reversal.** The retry above only covers *within* a run; `am-08` still
+died because a throttle was not classified as a **transport** error, so a resume reloaded it
+as permanently failed. An earlier version of this repo asserted that on purpose — a test
+named `test_a_throttle_is_not_transport` recorded the throttle as "a property of the quota
+rather than of the machine". That reasoning was wrong, and it confused *whose fault* the
+failure was with *whether it is a finding about the architecture*. The limiter estimated
+8,092 tokens against an 8,000 cap and the model never saw the question, so the system under
+test did not fail — the arithmetic in this repo did. Reclassified, `am-08` was re-attempted
+and answered correctly, and the test now asserts the opposite of what it once did, with the
+reversal written into its docstring rather than quietly swapped. Canon's error rate moved
+3.8% to 2.5% as a result.
 
 ### A4. A scoring convention penalised the baseline twice
 
@@ -106,13 +119,17 @@ accuracy moved 51/55 → 53/55 as a result, i.e. against Canon's interest.
 
 ### B1. Wrong metric selected
 
-**Canon: TBD.** **Baseline: not directly measurable** — it declares no metric, which is
+**Canon: 0 of 55.** Every answerable question Canon answered used the gold metric
+(`metric_correct` is true across all 55; semantic accuracy 100%). This is the claim the
+enum design exists to make structurally, so a zero here is the expected result rather than a
+surprising one — a wrong metric is unrepresentable, not merely rare.
+**Baseline: not directly measurable** — it declares no metric, which is
 §3.2's point. Where a wrong number is traceable to another question's gold value, the
 attribution instrument names it, subject to the coverage limit reported in RESULTS.md.
 
 ### B2. Correct metric, wrong grain
 
-**Canon: TBD.** The compiler makes the illegal cases unrepresentable — `avg_order_value` by
+**Canon: 0 of 55.** The compiler makes the illegal cases unrepresentable — `avg_order_value` by
 `product_category` is refused before SQL exists — so a grain failure here would have to be
 a *legal* pair used inappropriately, e.g. answering a monthly question at daily grain.
 
@@ -135,11 +152,38 @@ pattern is almost always a **missing default filter**:
   rather than purchase date.
 
 Each is defensible in isolation. None matches the canonical definition, and the baseline had
-no way to know the definition exists. **Canon: TBD.**
+no way to know the definition exists. **Canon: 0 of 55** — no Canon answer failed on a
+filter. The default filters come from the card, so there is nothing for the model to omit.
+
+### B5. Right number, wrong presentation — Canon's only answer-class failures
+
+**Canon: 2 of 55** (`t2-03`, `t2-06`). Both were scored wrong, and in both the arithmetic is
+*exactly* gold's. I found this by re-executing the stored SQL rather than trusting the
+score, and it changes what the failures mean.
+
+- `t2-03` — *"Which five product categories brought in the most gross revenue in 2018?"*
+  Canon grouped by `product_category` (Portuguese) where gold uses
+  `product_category_english`, which needs a third join through the translation table. The
+  five revenue figures are identical to gold's, in the same order, to the cent
+  (885191.12, 771986.75, 650794.70, 621999.34, …); only the labels differ —
+  `beleza_saude` against `health_beauty`. A real failure, and a narrow one: the model picked
+  the untranslated sibling dimension, not the wrong metric, filter, ranking or grain.
+- `t2-06` — *"Show net revenue by month in 2018 for São Paulo and Rio de Janeiro states
+  only."* Gold groups by month **and** state; Canon filtered to SP and RJ and grouped by
+  month alone. Canon's monthly totals equal gold's rows summed over state, exactly
+  (2018-01: 495257.48 = 374404.45 + 120853.03). The reading is defensible — *"by month"*
+  names the breakdown and *"for SP and RJ only"* names a filter — and the question is
+  weaker than I intended. Left as written rather than edited after seeing results.
+
+**Both are dimension-selection failures, not definition failures**, which is why
+`shape_correct` catches `t2-06` (98.1% against 90.9% execution) and misses `t2-03`, whose
+column count and grain are right. Worth stating against my own interest: a benchmark
+reporting only execution accuracy would call these two the same kind of failure as the
+baseline's missing-filter cases, and they are not.
 
 ### B4. Caveat not surfaced
 
-**Canon: TBD.** Asserted per question by `requires_caveat`; the tier-3 cases are where it
+**Canon: 1 of 8 cases requiring one** (`t3-10`). Asserted per question by `requires_caveat`; the tier-3 cases are where it
 bites, especially `t3-02` (the 2018-01-01 restatement must fire) paired against `t3-03`
 (the same metric inside one regime, where it must stay silent).
 
@@ -149,26 +193,39 @@ bites, especially `t3-02` (the 2018-01-01 restatement must fire) paired against 
 
 ### C1. Over-refusal — asked when it should have answered
 
-**Canon: TBD.** Two cases are already known and attributable to A1 rather than to the
-policy.
+**Canon: 3 of 55** (`t1-09`, `t1-10`, `t2-05`) — the largest single category of Canon
+failure, and only two of the three are the A1 artefact.
+
+`t2-05` is different and I had it filed wrongly until I read it. *"What was net revenue in
+São Paulo state in 2018?"* Canon asked: *"net revenue for orders placed by customers in São
+Paulo (`customer_state`) or for sales made by sellers located in São Paulo
+(`seller_state`)?"* Both dimensions exist, both are legal, and the question does not say.
+Gold resolves it to `customer_state` and its note asserts only that *"the state code is
+SP"* — which answers the code, not the fork. **Canon's clarifying question is the better
+answer and is scored a failure.** This is an eval-set weakness of the same species as
+`t1-04` in section D, and it is left as written for the same reason: editing a question
+after seeing it cost Canon a point is worse than reporting the point.
 
 ### C2. Under-refusal — answered when it should have asked
 
 **Baseline: 18 of 25**, verified over the complete arm. It used its `CLARIFY` option on 7
 questions (`am-05`, `am-08`, `am-09`, `am-21`, `am-23`, `am-24`, `am-25`) — so the
 permission to refuse is doing real work rather than serving as an alibi, and the remaining
-18 are genuine guesses at underspecified questions. **Canon: TBD.**
+18 are genuine guesses at underspecified questions. **Canon: 0 of 25** — under-refusal
+is the failure the project most wants at zero, and in this run it is.
 
 ### C3. Refuse instead of clarify
 
-**Canon: TBD.** The 3×3 behaviour matrix separates this from a correct refusal: declining a
+**Canon: 1 of 25**, with 3 more in the opposite direction (refuse-class questions answered
+with a clarifying question — a *scope* failure, not a trust one). The 3×3 behaviour matrix
+separates this from a correct refusal: declining a
 resolvable question by claiming the metric is undefined is a *capability* failure, distinct
 from answering one that should have been asked about, which is a *trust* failure. Summing
 them into one refusal-accuracy number hides which kind of system you have.
 
 ### C4. Comparison window wrong
 
-**Canon: TBD.** The compiler derives both windows, so a failure here means the model set the
+**Canon: 0.** The compiler derives both windows, so a failure here means the model set the
 wrong anchor range or the wrong comparison kind, not that the arithmetic slipped.
 
 ---
@@ -203,7 +260,32 @@ defensible and the *question* is weaker than I intended; a sharper wording would
 placed in 2018 that were delivered". It is left as written rather than edited after seeing
 results, which would be a worse sin than an imprecise question.
 
-**Remaining gold review, once the Canon arm completes:** every question where Canon and the
-baseline agree with each other and disagree with gold. Two independent implementations
-agreeing against gold is the strongest available signal of a gold error, and it is the check
-I most expect to find something.
+**The gold review, now run.** Both arms are complete, so the check this section promised —
+every question where Canon and the baseline agree with each other and disagree with gold —
+has been executed by re-running all three SQL strings against the warehouse and comparing
+rows directly.
+
+**Two questions have both arms wrong: `t2-03` and `t2-06`. On neither do the two arms
+agree with each other.** The strongest available signal of a gold error fired nowhere.
+
+That is a weaker result than it sounds, and I would rather say so than bank it:
+
+- The check has a sample size of two. With 55 answerable questions and Canon failing 2 of
+  them, there was almost no opportunity for the signal to appear. A benchmark where the
+  system under test is accurate is a benchmark where this particular check is nearly blind.
+- Both arms being wrong for *unrelated* reasons is the common case and is what happened
+  here. On `t2-03` Canon's revenue figures match gold to the cent and only the category
+  labels differ, while the baseline's figures are wrong outright (772,238.15 against
+  885,191.12 on the top row — it omits freight). On `t2-06` Canon reconciles exactly to gold
+  summed over state, while the baseline is wrong again on the order-status filter. Two
+  different failures that happen to land on the same question are not corroboration.
+- So the honest reading is **not** "gold is verified". It is: the one mechanical check that
+  could have caught a gold error I cannot see had almost nothing to work with, and found
+  nothing. Section D's three stated blind spots are untouched by it.
+
+What the review *did* surface is in B5 and C1: two scored failures (`t2-03`, `t2-06`) where
+Canon's arithmetic is exactly right and the disagreement is about presentation, and one
+(`t2-05`) where Canon's clarifying question is better than my gold. None was visible in the
+score; all three needed the SQL re-executed. **A score tells you a question failed. Only
+the query tells you what failed**, which is the argument this project makes about analytics
+agents, turned on the benchmark itself.
