@@ -28,17 +28,35 @@ at it.
 
 ## Results
 
-**TBD** — the sweep is in progress. Every number will land in
-[`benchmark/RESULTS.md`](benchmark/RESULTS.md) with its provenance: provider, model id,
-config hash, code commit, eval-set commit, and the `metrics.yaml` hash.
+From run `sweep-groq-r1`, 2026-10-01, code commit `0f1df89`, eval set `df52cc6`, on
+`groq` / `openai/gpt-oss-120b` (free tier). Both arms complete: 80 questions each, 160/160
+units. Full provenance — config hash, `metrics.yaml` hash, thresholds — and every figure
+below are generated, not transcribed, in
+[`benchmark/RESULTS.md`](benchmark/RESULTS.md).
 
 | Metric | Canon | Baseline |
 |---|---|---|
-| Silent-wrong rate (headline safety) | TBD | TBD |
-| Execution accuracy | TBD | TBD |
-| Semantic accuracy | TBD | n/a — see below |
-| Behaviour accuracy (3×3 diagonal) | TBD | TBD |
-| Paired discrimination | TBD | TBD |
+| Silent-wrong rate (headline safety) | **2.5%** | 68.8% |
+| Execution accuracy | **90.9%** | 32.7% |
+| Shape accuracy (columns + grain) | 98.1% | 96.4% |
+| Semantic accuracy | **100%** | n/a — see below |
+| Behaviour accuracy (3×3 diagonal) | **88.8%** | 72.5% |
+| Under-refusal (answered when it should have asked) | **0.0%** | 72.0% |
+| Over-refusal (asked when it should have answered) | 5.5% | 0.0% |
+| Paired discrimination | **3/3** | 0/3 |
+
+**Read the shape/execution pair together.** The baseline scores 96.4% shape against 32.7%
+execution: it asks for the right columns at the right grain and then computes them under
+the wrong definition. That gap is the entire argument for a canonical layer, and a
+benchmark reporting only shape would score the baseline near-perfect.
+
+**Over-refusal is Canon's one losing row**, and it is the honest cost of the design. Three
+of 55 answerable questions, of which two are an artefact of my eval set and one —
+`t2-05` — is a case where Canon's clarifying question is better than my gold. All three are
+read individually in [`docs/03-failures.md`](docs/03-failures.md) §C1.
+
+**Free, open-weights model.** The absolute levels would be higher on a frontier model. The
+*delta* between the two systems is the claim, not the level.
 
 Semantic accuracy is `n/a` for the baseline and that is the finding, not a gap in the
 harness: with no semantic layer it declares no metric, so "which definition produced this
