@@ -161,6 +161,46 @@ def main() -> int:
     return 0
 
 
+def _half_correct(score: QuestionScore) -> bool:
+    """Whether one half of a pair got the response its question required."""
+    if score.expected_behavior == "answer":
+        return score.value_correct is True
+    return bool(score.refusal_correct)
+
+
+def _paired_section(
+    manifest: dict[str, Any],
+    two: dict[str, QuestionScore],
+    single: dict[str, QuestionScore],
+) -> str:
+    """The reflex-immune comparison, which is why the pairs were force-included."""
+    pairs = manifest["force_included_pairs"]
+    rows = [
+        "Each pair looks alike and requires opposite responses, so a system with a reflex "
+        "scores zero. This is the comparison the subset was built around.",
+        "",
+        "| Pair | Single-stage | Two-stage |",
+        "|---|---|---|",
+    ]
+    tally = {"single": 0, "two": 0}
+    for pair in pairs:
+        left, right = pair["left"], pair["right"]
+        verdicts = {}
+        for key, data in (("single", single), ("two", two)):
+            won = _half_correct(data[left]) and _half_correct(data[right])
+            tally[key] += won
+            detail = " / ".join(
+                f"{name} {'ok' if _half_correct(data[name]) else '**WRONG**'}"
+                for name in (left, right)
+            )
+            verdicts[key] = f"{'PASS' if won else 'FAIL'} — {detail}"
+        rows.append(f"| {pair['pair']} | {verdicts['single']} | {verdicts['two']} |")
+    rows.append(
+        f"| **total** | **{tally['single']}/{len(pairs)}** | **{tally['two']}/{len(pairs)}** |"
+    )
+    return "\n".join(rows)
+
+
 def _rate(scores: list[QuestionScore], predicate: Any) -> str:
     eligible = [s for s in scores if predicate(s) is not None]
     if not eligible:
@@ -217,6 +257,8 @@ def _write_report(
             "",
         ]
 
+    lines += ["## Paired discrimination", "", _paired_section(manifest, two, single), ""]
+
     lines += [
         "## Scores on the subset",
         "",
@@ -236,6 +278,41 @@ def _write_report(
     lines += [f"| Errors | {errors_one}/{len(ids)} | {errors_two}/{len(ids)} |", ""]
 
     lines += [
+        "## Diagnosis — read before quoting any number above",
+        "",
+        "The three questions two-stage lost (`t2-01`, `t2-04`, `t3-02`) fail for one "
+        "shared reason, visible in the clarifying questions it asked:",
+        "",
+        '> *"...or would you like a total net revenue for each month using a custom time '
+        'grouping?"* (`t2-01`)',
+        "",
+        '> *"Would you like the total reported revenue for each quarter (time '
+        'aggregation) **even though quarter is not a listed breakdown dimension**?"* '
+        "(`t3-02`)",
+        "",
+        "All three name a time grain — month, month, quarter. The stage-A short card ends "
+        "with `breaks down by: <valid_dimensions>`, and **time grain is not a dimension** "
+        "in this semantic layer; it is a separate field on the intent. The full prompt "
+        "says so across 28 lines; the stage-A prompt mentions grain only incidentally "
+        'inside two metric descriptions. So stage A looks for "month" among the '
+        "breakdown dimensions, does not find it, and correctly concludes it has been "
+        "asked for something it cannot see how to express.",
+        "",
+        "**That is a defect in this repo's stage-A prompt, not a property of two-stage "
+        "prompting.** The ablation measured my implementation. Stated plainly because the "
+        'honest conclusion from the table above is *not* "splitting the prompt costs '
+        'accuracy" — it is "splitting the prompt costs accuracy if you drop information '
+        'the model needs, and I dropped some".',
+        "",
+        "**The one question two-stage won should not be counted as a win.** On `t2-05` "
+        'single-stage asked whether *"net revenue in São Paulo state"* meant '
+        "`customer_state` or `seller_state`, and two-stage answered. "
+        "[`docs/03-failures.md`](../docs/03-failures.md) §C1 records that question as a "
+        "case where the clarifying question is *better than my gold* — both dimensions "
+        "exist and the question does not say which. So two-stage scores a point here for "
+        "failing to notice a real ambiguity, and the `refusal correct` row above is "
+        "flattering it by one.",
+        "",
         "## What this does and does not establish",
         "",
         f"The subset is {len(ids)} questions, so a one-question change moves any rate here "
@@ -243,9 +320,20 @@ def _write_report(
         "finding and the per-measure rates as supporting detail; neither is powered to "
         "detect a small difference.",
         "",
+        "The paired-discrimination row is the exception worth taking seriously even at "
+        "this sample size, because it is the one measure a hedging reflex cannot game: "
+        "two-stage asked on `t3-02` and answered `t3-03`, which is precisely the "
+        "distinction the pair exists to test. Those two questions use the same metric "
+        "and differ only in whether the 2018-01-01 restatement falls inside the window.",
+        "",
         "Token cost is not re-measured here. `scripts/dry_run.py` projects the saving "
         "offline from the real prompts, and that projection is the cost side of this "
         "trade-off; this document is only the accuracy side.",
+        "",
+        "**Status: this is iteration 1, before the stage-A prompt defect is fixed.** The "
+        "number to compare a future run against is the one above, recorded before the "
+        "cause was known, so a later improvement cannot be mistaken for the original "
+        "result.",
         "",
     ]
     OUTPUT.write_text("\n".join(lines), encoding="utf-8")
