@@ -110,6 +110,27 @@ class Usage(BaseModel):
     def free(self) -> bool:
         return is_free_tier(self.provider)
 
+    def __add__(self, other: Usage) -> Usage:
+        """Fold two stages of one question into a single usage record.
+
+        Tokens, latency, throttle time and attempt counts add. ``cached`` is AND, not OR:
+        a two-stage question is only a cache hit if *both* stages hit, since one live call
+        still spends quota and still has to wait for the limiter. Reporting it as cached
+        would make the ablation's token cost look smaller than it is, in the direction
+        that flatters the strategy under test.
+        """
+        return Usage(
+            provider=self.provider or other.provider,
+            model_id=self.model_id or other.model_id,
+            config_hash=self.config_hash or other.config_hash,
+            input_tokens=self.input_tokens + other.input_tokens,
+            output_tokens=self.output_tokens + other.output_tokens,
+            cached=self.cached and other.cached,
+            latency_seconds=self.latency_seconds + other.latency_seconds,
+            throttled_seconds=self.throttled_seconds + other.throttled_seconds,
+            attempts=self.attempts + other.attempts,
+        )
+
 
 class CacheMiss(RuntimeError):
     """A cache-only client was asked for something it did not have.
@@ -148,6 +169,10 @@ class CallContext(BaseModel):
     stage: str = ""
     """Which stage of the two-stage prompt this is. Two calls for one question must not
     collide in the cache."""
+
+    def with_stage(self, stage: str) -> CallContext:
+        """This context, tagged for one stage of a two-stage call."""
+        return self.model_copy(update={"stage": stage})
 
 
 def _cache_key(

@@ -25,12 +25,17 @@ from canon.agent.policy import (
     decide,
     log_decision,
 )
-from canon.agent.prompt import DataWindow, build_system_prompt
+from canon.agent.prompt import (
+    DataWindow,
+    build_stage_a_prompt,
+    build_stage_b_prompt,
+    build_system_prompt,
+)
 from canon.agent.verify import VerificationReport, to_answer_value, verify
 from canon.compiler.build import CompiledQuery, compile_plan
 from canon.compiler.validate import validate_intent
 from canon.schemas.answer import Answer, ChartSpec
-from canon.schemas.decision import AgentDecision
+from canon.schemas.decision import AgentDecision, IntentFill, MetricSelection, compose
 from canon.schemas.errors import InvalidIntent, InvalidIntentDetail
 from canon.schemas.intent import QueryIntent
 from canon.semantic.cards import SemanticLayer
@@ -148,6 +153,70 @@ class CanonPipeline:
                 error=str(error),
             )
 
+        return self._from_decision(question, decision, usage)
+
+    def answer_two_stage(self, question: str, context: CallContext | None = None) -> PipelineResult:
+        """The ablation arm: choose a metric from short cards, then fill the intent.
+
+        Stage A sees 24 one-line cards; stage B sees the full card for the one metric it
+        chose. An unanswerable question stops after stage A, which is why the strategy
+        averages fewer than two calls per question rather than exactly two.
+
+        It deliberately shares ``_from_decision`` with the single-stage path. The policy,
+        the compiler and the verifier therefore cannot tell which strategy produced the
+        ``AgentDecision`` they are handed -- prompting strategy is the only variable the
+        ablation changes, and that is enforced here rather than asserted in prose.
+        """
+        try:
+            selection, usage = self.client.structured(
+                system=build_stage_a_prompt(self.layer, self.window),
+                question=question,
+                output_format=MetricSelection,
+                context=context.with_stage("a") if context is not None else None,
+            )
+        except LlmError as error:
+            return PipelineResult(
+                question=question,
+                answer=None,
+                decision=None,
+                intent=None,
+                sql=None,
+                usage=Usage(),
+                error=str(error),
+            )
+
+        fill: IntentFill | None = None
+        if selection.chosen_metric is not None:
+            try:
+                fill, stage_b_usage = self.client.structured(
+                    system=build_stage_b_prompt(
+                        self.layer, self.window, selection.chosen_metric.value
+                    ),
+                    question=question,
+                    output_format=IntentFill,
+                    context=context.with_stage("b") if context is not None else None,
+                )
+            except LlmError as error:
+                return PipelineResult(
+                    question=question,
+                    answer=None,
+                    decision=None,
+                    intent=None,
+                    sql=None,
+                    usage=usage,
+                    error=str(error),
+                )
+            usage = usage + stage_b_usage
+
+        return self._from_decision(question, compose(selection, fill), usage)
+
+    def _from_decision(
+        self, question: str, decision: AgentDecision, usage: Usage
+    ) -> PipelineResult:
+        """Everything after the model: validate, compile, decide, execute, verify.
+
+        Extracted so that both prompting strategies run byte-identical downstream logic.
+        """
         compiled: CompiledQuery | None = None
         plan = None
         invalid: InvalidIntentDetail | None = None
