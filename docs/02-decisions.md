@@ -4,8 +4,12 @@ Architecture decisions, each with the alternative it was chosen over and what wo
 change my mind. Ordered roughly by how much they matter.
 
 **On numbers in this document.** Accuracy figures live in
-[`benchmark/RESULTS.md`](../benchmark/RESULTS.md) and are `TBD` here until a run fills
-them. Token counts *are* quoted, because they were measured locally on this machine by
+[`benchmark/RESULTS.md`](../benchmark/RESULTS.md), and the ablation's in
+[`benchmark/ABLATION.md`](../benchmark/ABLATION.md). The few quoted here are cited to the
+run that produced them and are `TBD` until one does; the ablation figures in ADR-005 are
+from a 24-question subset and say so at the point of use, because quoting a subset figure
+without its denominator is how a 4.2-point-per-question sample starts sounding like a
+measurement. Token counts *are* quoted, because they were measured locally on this machine by
 `scripts/dry_run.py` — exactly, using the GPT-OSS harmony tokenizer — and the artifact is
 committed at [`benchmark/dry_run.md`](../benchmark/dry_run.md). Re-derive any of them with
 `uv run python scripts/dry_run.py`.
@@ -232,16 +236,38 @@ shows the full card for that one metric and fills the intent. Both fold into the
 | Prompt tokens, 80 questions | 553,225 | 329,979 |
 | Total tokens, 80 questions | 609,225 | 424,479 |
 | Days at 200k/day | 3.05 | 2.12 |
-| Execution accuracy | TBD | TBD |
-| Semantic accuracy | TBD | TBD |
+| Execution accuracy, 24-question subset | 16/17 | 17/18 |
+| Paired discrimination, 3 pairs | 3/3 | 3/3 |
 
 A 30% token saving for 55 extra requests. Notably *less* than the character-level saving
 suggests, because stage B's `IntentFill` schema costs 1,468 tokens and is paid on every
 answerable question — the schema, not the prose, is the floor.
 
-**Whether it costs accuracy is an ablation, not an assumption.** Results in RESULTS.md. If
-two-stage loses accuracy, full stuffing keeps the headline and the ablation is reported as
-a negative result, which is worth publishing either way.
+**Whether it costs accuracy was an ablation, and it has now run.** Full result and
+provenance in [`benchmark/ABLATION.md`](../benchmark/ABLATION.md); accuracy figures above
+are from the 24-question stratified subset, not the full 80.
+
+**Outcome: two-stage matches full stuffing on the subset — but only after a fix, and the
+fix is the finding.** Iteration 1 lost three questions and one paired-discrimination item.
+All three named a time grain, and the cause was structural rather than a wording slip:
+stage A's schema is `MetricSelection`, which has **no `time_grain` field at all**, so the
+only place `month` could live from stage A's point of view was `valid_dimensions`. It
+looked, did not find it, and correctly declined. Full stuffing never had the problem
+because `QueryIntent.time_grain` sits in its schema. One rule added to the stage-A
+instructions recovered all three and broke none.
+
+**What that means for the decision.** The token saving is real and, on this subset, free.
+But the failure mode it exposes is specific to splitting: *stage A can only reason about
+what its own schema lets it express*, so every field the first call cannot see becomes a
+silent source of over-refusal. Full stuffing is more robust precisely because it is
+wasteful — the model sees everything, so nothing can be accidentally withheld from it.
+
+**Decision: keep full stuffing as the headline configuration.** Not because two-stage
+scored worse — after the fix it did not — but because the ablation measured one prompt
+defect and found one, on 24 questions, where a single question moves any rate by 4.2
+points. Two-stage is the right lever if the metric catalogue grows past the point where
+stuffing fits; it is not worth switching to for a 30% saving on a budget that currently
+fits.
 
 ---
 

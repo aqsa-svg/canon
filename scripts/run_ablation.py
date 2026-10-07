@@ -270,6 +270,26 @@ def _write_report(
         "The single-stage column is **not re-run** — it is read from the published "
         "`sweep-groq-r1` records, so these are the same numbers `RESULTS.md` reports.",
         "",
+        "## Bottom line",
+        "",
+        "**On this subset, after one prompt fix, two-stage matches full-stuffing: same "
+        "paired discrimination (3/3), no question answered worse, zero errors.** The "
+        "dry run projects two-stage at ~30% fewer tokens, so on these 24 questions the "
+        "saving looks free.",
+        "",
+        "Three reasons not to read that as a recommendation to switch:",
+        "",
+        "1. **The one row where two-stage looks *better* is an artefact.** Its 24/24 "
+        "refusal score includes `t2-05`, where it answered a question that single-stage "
+        "correctly flagged as ambiguous. Read the Diagnosis section before quoting that "
+        "row — on the project's own terms, single-stage is right there and the scorer is "
+        "wrong.",
+        "2. **It took a fix to get here.** Iteration 1 lost three questions and a paired "
+        "item to a single missing sentence about time grain. Two-stage starts with less "
+        "information in front of the model, so it is more sensitive to prompt defects — "
+        "which is a real cost, just not one visible in a token count.",
+        "3. **24 questions cannot detect a small difference.** The full set is 80.",
+        "",
         "## Subset",
         "",
         f"{len(ids)} questions, stratified by tier. {manifest['deliberate_oversampling']}",
