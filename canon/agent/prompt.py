@@ -221,6 +221,12 @@ Rules:
   say the metric is not defined. Do not substitute the nearest available metric.
 - A metric can only be broken down by the dimensions listed against it. Where a breakdown
   is excluded, the query would run and the number would be wrong.
+- "breaks down by" lists *non-time* dimensions only. Reporting a metric by day, week,
+  month, quarter or year is a time grain, it is set in step 2, and it is available for
+  every metric here. A question asking for something "by month", "per quarter" or "over
+  time" is therefore fully answerable and is NOT missing information -- choose the metric
+  and move on. You have no field for the grain right now, which is expected; do not read
+  its absence as a reason to decline.
 - There is no "today". The data ends on a fixed date given below, so "recently", "last
   month" or "this quarter" without an anchoring date is missing information.
 - `reading` is your one-sentence paraphrase of the question. Write it before choosing.
