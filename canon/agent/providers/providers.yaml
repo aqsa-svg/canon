@@ -82,9 +82,22 @@ gemini:
     requests_per_day: 250
     tokens_per_day: null
     source: >-
-      Google AI Studio free tier for the current Flash model, from provider docs at time
-      of writing. Free-tier quotas for Gemini have changed repeatedly; re-check before
-      quoting.
+      UNVERIFIED, and more weakly sourced than the Groq figures. Google AI Studio free
+      tier for the current Flash model, from provider docs at time of writing. Google no
+      longer publishes these consistently and the dashboard is only visible to the signed
+      in account holder, which this process cannot read. Free-tier quotas for Gemini have
+      changed repeatedly; re-check before quoting.
+
+      No figure here has been confirmed by Google refusing a call and quoting its own
+      ceiling, which is the only evidence this project accepts for verified: true. The
+      limiter therefore treats these as a planning estimate, not a contract, and the run
+      records any limit the provider quotes while enforcing it -- the same route by which
+      Groq's tokens_per_minute became provider-confirmed.
+
+      Note the limit SHAPE differs from Groq's: Gemini free tier is bounded by requests
+      per day rather than tokens per day, so the binding constraint on a sweep is the
+      call count, not the prompt size. A two-stage strategy that halves tokens but adds
+      a call is therefore WORSE here, not better -- the opposite of the Groq trade-off.
     verified: false
 
 anthropic:

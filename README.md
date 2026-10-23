@@ -116,8 +116,20 @@ The whole benchmark runs on free tiers. No paid key is needed.
 | Google AI Studio | [aistudio.google.com/apikey](https://aistudio.google.com/apikey) | see provider docs | cross-model check (optional) |
 
 ⚠ **Google's free tier may use submitted prompts and responses to improve their
-products.** The warehouse here is a public dataset and the questions are synthetic, so
-nothing confidential is at stake — but that is why Gemini is the *secondary* provider.
+products.** This applies to free-tier use outside the EU, UK and Switzerland, which is
+where this benchmark was run — so it applies here rather than being a hypothetical.
+
+What is actually sent: questions from `benchmark/questions/`, which are synthetic and
+committed to this repo, and the metric cards from `semantic/metrics.yaml`, which describe
+a public Kaggle dataset. No warehouse rows are ever in a prompt — the model never sees
+data, only the schema and the metric definitions, which is the first core idea of the
+project rather than a privacy measure. So this is **disclosure, not exposure**: everything
+submitted is already public in this repository.
+
+It is still why Gemini is the *secondary* provider and why the headline runs on Groq.
+Anyone reproducing this with a private warehouse should read that paragraph again before
+pointing it at their own `metrics.yaml`, since metric definitions can themselves be
+commercially sensitive even when no rows leave the building.
 
 **2. Set up.**
 
