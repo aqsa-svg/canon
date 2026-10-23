@@ -137,6 +137,19 @@ When a system returns a wrong number, the harness checks whether that number is 
 - **baseline**: single run -- no variance measured. No spread is reported rather than printing 0.0, which would claim a stability never measured.
 - **canon**: single run -- no variance measured. No spread is reported rather than printing 0.0, which would claim a stability never measured.
 
+## Latency and cost
+
+Pre-registered in `docs/01-evaluation.md` over *all questions*. That denominator is wrong and is corrected here: a cache hit records 0.0 seconds, so a mean over all questions measures how full the cache is, not how fast the system is.
+
+| System | units | cache-served | live calls timed | mean | median | max |
+|---|---|---|---|---|---|---|
+| canon | 80 | 36 | 42 | 3.01s | 2.33s | 8.72s |
+| baseline | 80 | 80 | 0 | not measured | not measured | not measured |
+
+**No cross-arm latency comparison is possible from this run.** Every baseline unit was served from cache, so the baseline has no live timing at all. Reporting its mean as 0.0s, or omitting the row and leaving Canon's figure to look like a comparison, would both be worse than saying so.
+
+**Mean cost per question is $0.00 for both arms**, and that is the whole point of the free-tier constraint rather than a rounding artefact: the provider bills nothing at this tier, so reproducing the benchmark costs nothing. The token spend it replaces is the real resource, and `data/quota_ledger.json` records it per UTC day.
+
 ## What these numbers do and do not mean
 
 **Execution accuracy measures conformance to a stated canonical layer, not correctness in the abstract.** I wrote the metric cards, the questions and the gold answers. The mechanism claims are independently checkable — a hallucinated metric is unrepresentable, fan-out cannot be built — but the accuracy figures rest on labels I authored. A finance team that had ruled net revenue the default would score Canon's refusal on `am-01` a failure. The project's claim is that having a canonical layer beats not having one, not that my particular layer is right.

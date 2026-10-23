@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import statistics
 import sys
 from pathlib import Path
 from typing import Any
@@ -37,6 +38,66 @@ def delta(canon: Any, baseline: Any, higher_is_better: bool) -> str:
     good = difference > 0 if higher_is_better else difference < 0
     marker = "" if abs(difference) < 0.05 else (" ✓" if good else " ✗")
     return f"{difference:+.1f}pp{marker}"
+
+
+def _latency_and_cost(tag: str) -> list[str]:
+    """Latency and cost, with the cache confound stated instead of averaged away.
+
+    ``docs/01-evaluation.md`` pre-registered "mean latency / question" over *all*
+    questions. That denominator turns out to be wrong: a cache hit records 0.0 seconds, so
+    averaging over all questions reports a number that falls as the cache fills and is not
+    a timing of anything. Only live calls are timed, and the count of them is printed so
+    the figure can be weighed.
+    """
+
+    lines = [
+        "## Latency and cost",
+        "",
+        "Pre-registered in `docs/01-evaluation.md` over *all questions*. That denominator "
+        "is wrong and is corrected here: a cache hit records 0.0 seconds, so a mean over "
+        "all questions measures how full the cache is, not how fast the system is.",
+        "",
+        "| System | units | cache-served | live calls timed | mean | median | max |",
+        "|---|---|---|---|---|---|---|",
+    ]
+    for system in ("canon", "baseline"):
+        path = RUNS_DIR / tag / f"{system}.jsonl"
+        if not path.exists():
+            continue
+        rows = [
+            json.loads(line)
+            for line in path.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        cached = sum(1 for row in rows if row.get("cached"))
+        live = [
+            row["latency_seconds"]
+            for row in rows
+            if not row.get("cached") and row.get("latency_seconds")
+        ]
+        if live:
+            stats = (
+                f"{statistics.mean(live):.2f}s | {statistics.median(live):.2f}s | {max(live):.2f}s"
+            )
+        else:
+            stats = "not measured | not measured | not measured"
+        lines.append(f"| {system} | {len(rows)} | {cached} | {len(live)} | {stats} |")
+
+    lines += [
+        "",
+        "**No cross-arm latency comparison is possible from this run.** Every baseline "
+        "unit was served from cache, so the baseline has no live timing at all. Reporting "
+        "its mean as 0.0s, or omitting the row and leaving Canon's figure to look like a "
+        "comparison, would both be worse than saying so.",
+        "",
+        "**Mean cost per question is $0.00 for both arms**, and that is the whole point of "
+        "the free-tier constraint rather than a rounding artefact: the provider bills "
+        "nothing at this tier, so reproducing the benchmark costs nothing. The token spend "
+        "it replaces is the real resource, and `data/quota_ledger.json` records it per UTC "
+        "day.",
+        "",
+    ]
+    return lines
 
 
 def main() -> int:
@@ -340,6 +401,8 @@ def main() -> int:
                     )
             lines.append("")
     lines.append("")
+
+    lines += _latency_and_cost(args.tag)
 
     # ---------------------------------------------------------------- caveats
     lines += [

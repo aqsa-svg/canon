@@ -268,6 +268,57 @@ question by question rather than merely visible as a moved aggregate.
 
 ---
 
+## Deviations from this pre-registration
+
+This document was written before the code it evaluates, and the table above still reads
+`TBD` on purpose: it is the plan, not the result. Results live in
+[`benchmark/RESULTS.md`](../benchmark/RESULTS.md).
+
+A pre-registration is only worth something if the departures from it are listed, including
+the ones that flatter the system. The run reported in `RESULTS.md` departs from the plan
+above in four ways.
+
+**1. The headline metric changed, and this is the significant one.** This document bolds
+**confident-wrong rate** as a primary outcome. `RESULTS.md` demotes it to secondary, behind
+a **silent-wrong rate** that did not exist when this was written. The reason is sound — the
+baseline reports no confidence, so scoring every baseline answer at 1.0 confidence is an
+*imputation*, and silent-wrong (a wrong answer handed over with neither a verification flag
+nor a clarifying question) needs no such assumption. But the reason was discovered by
+running the baseline, which means **the primary endpoint was changed after seeing data**.
+That is exactly what pre-registration exists to surface, so it is recorded here as a
+deviation rather than presented only as an improvement. Both numbers are reported, and on
+this run they happen to coincide (2.5% / 68.8%), so nothing turns on the choice — but that
+is luck, not method.
+
+**2. "Weak refusals (rubric 1)" was never implemented.** It was replaced by *names the
+fork*, a mechanical proxy that checks whether a clarifying question actually names the
+competing metrics rather than hedging generically. The rubric would have needed a human
+grader or an LLM judge; the proxy needs neither and is checkable. It measures less: a
+question can name both metrics and still be a poor question. Scored as a proxy, labelled as
+one.
+
+**3. The latency denominator here is wrong.** "Mean latency / question, all questions"
+cannot be computed: a cache hit records 0.0 seconds, so that mean falls as the cache fills
+and times nothing. `RESULTS.md` reports latency over live calls only, with the cache-served
+count beside it. In the published run the entire baseline arm was cache-served, so there is
+**no cross-arm latency comparison at all** — a limitation this document did not anticipate.
+
+**4. Eight measures were added that are not planned here**: shape accuracy, the 3x3
+behaviour matrix, paired discrimination, caveat-surfaced rate, error rate, the attribution
+instrument with its coverage bound, cross-run variance, and the two-stage ablation. Adding
+measures after the fact is far less dangerous than changing a headline, but it is not
+nothing: with enough added measures something will favour the system under test. The
+defence is that each is defined mechanically in `benchmark/harness/score.py` and reported
+for both arms on the same denominators, not selected after inspection — and that paired
+discrimination, the one I most want quoted, was specified to be immune to the reflex
+strategies a system could otherwise game.
+
+**What did not change:** the question set, the tiers, the gold answers, the refusal
+thresholds (`metric_score_margin=0.15`, `minimum_top_score=0.45`, both chosen a priori and
+never fitted), and the rule that a confident wrong answer is worse than a refusal.
+
+---
+
 ## 5. Target composition of the eval set
 
 **Design intent, not a measurement.** Actual counts appear here once the set exists.

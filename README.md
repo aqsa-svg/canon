@@ -28,11 +28,21 @@ at it.
 
 ## Results
 
-From run `sweep-groq-r1`, 2026-10-01, code commit `0f1df89`, eval set `df52cc6`, on
-`groq` / `openai/gpt-oss-120b` (free tier). Both arms complete: 80 questions each, 160/160
-units. Full provenance — config hash, `metrics.yaml` hash, thresholds — and every figure
-below are generated, not transcribed, in
-[`benchmark/RESULTS.md`](benchmark/RESULTS.md).
+From run `sweep-groq-r1` on `groq` / `openai/gpt-oss-120b` (free tier), eval set
+`df52cc6`. Both arms complete: 80 questions each, 160/160 units. Full provenance — config
+hash, `metrics.yaml` hash, thresholds — and every figure below are generated, not
+transcribed, in [`benchmark/RESULTS.md`](benchmark/RESULTS.md).
+
+**On the run's date.** `RESULTS.md` stamps `started_at 2026-10-02` and `code_commit
+f490b7e`, and both describe the *last resume*, not when the answers were produced. A
+free-tier sweep cannot finish inside one day's token budget, so this one ran across eight
+UTC days between 2026-09-04 and 2026-10-07 (the last two days are the ablation), each
+recorded in `data/quota_ledger.json`. The provenance stamp is therefore weaker than it
+looks: it pins the code at the final session, not the code that answered each question. One
+unit — `am-08` — was in fact answered under a later commit than the rest, after a throttle
+was reclassified as a transport error. Stated rather than smoothed over, because
+`docs/01-evaluation.md` promises that a number without provenance gets deleted, not
+trusted.
 
 | Metric | Canon | Baseline |
 |---|---|---|
