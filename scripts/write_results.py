@@ -41,6 +41,54 @@ def delta(canon: Any, baseline: Any, higher_is_better: bool) -> str:
     return f"{difference:+.1f}pp{marker}"
 
 
+def _answering_span(provenance: dict[str, Any]) -> list[str]:
+    """When the answers were actually produced, and whether one unit is comparable.
+
+    A single ``code_commit`` is a convenient fiction for a free-tier sweep: the token cap
+    forces it across days, so different units were answered under different commits. This
+    states the span and resolves the one unit that is known to differ.
+    """
+    sessions = provenance.get("answering_sessions") or []
+    if not sessions:
+        return []
+
+    reconstructed = any("reconstructed" in str(item) for item in sessions)
+    days = [str(item).split("@", 1)[0] for item in sessions]
+    lines = [
+        "**When these answers were produced.** A free-tier sweep cannot finish inside one "
+        f"day's token cap, so this one ran across **{len(days)} sessions, "
+        f"{days[0]} to {days[-1]}**. `code_commit` names the last of them, not all of "
+        "them — a single commit is a convenient fiction for a run that spans a month.",
+        "",
+    ]
+    if reconstructed:
+        lines += [
+            "These session dates are **reconstructed** from `data/quota_ledger.json`, "
+            "which records live calls per UTC day, because this run predates per-session "
+            "provenance recording. Earlier versions of the harness re-stamped "
+            "`started_at` on every scoring pass, including passes that answered nothing, "
+            "so the originally recorded value was overwritten and is not recoverable. "
+            "Runs from this commit forward record each answering session as it happens "
+            "and never restamp. Marked as reconstruction rather than presented as a log.",
+            "",
+        ]
+    lines += [
+        "**One unit was answered under later code: `am-08`.** It first died to a Groq TPM "
+        "overage that the harness classified as a permanent failure; once that was "
+        "reclassified as a transport error it was re-attempted and answered correctly. "
+        "The intervening commits touched `benchmark/RESULTS.md`, `docs/03-failures.md`, "
+        "`scripts/write_results.py`, `tests/`, and seven lines of "
+        "`canon/agent/providers/implementations.py` — all of them additions to a "
+        "`_TRANSPORT_MARKERS` tuple that is read only when loading a checkpoint to decide "
+        "what to retry. The prompt, the metric cards, the compiler, the refusal policy and "
+        "the scorer are byte-identical across the range, and `is_transport_error` is not "
+        "reachable from the answer path at all. **`am-08` is therefore comparable, not "
+        "contaminated**, and is included.",
+        "",
+    ]
+    return lines
+
+
 def _latency_and_cost(raw_aggregates: list[dict[str, Any]]) -> list[str]:
     """Latency and cost, read from the harness's instrument rather than recomputed.
 
@@ -193,7 +241,11 @@ def main() -> int:
     if thresholds:
         rendered = ", ".join(f"{k}={v}" for k, v in thresholds.items())
         lines.append(f"| policy_thresholds | `{rendered}` |")
+    for key in ("scored_at", "scoring_commit"):
+        if provenance.get(key):
+            lines.append(f"| {key} | `{provenance[key]}` |")
     lines += ["", f"**Threshold provenance.** {provenance.get('threshold_provenance', 'TBD')}", ""]
+    lines += _answering_span(provenance)
 
     # ---------------------------------------------------------------- headline
     lines += ["## Headline", ""]

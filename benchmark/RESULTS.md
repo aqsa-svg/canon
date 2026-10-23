@@ -6,13 +6,13 @@ Generated from `benchmark/runs/sweep-groq-r1/report.json` by `scripts/write_resu
 
 | Field | Value |
 |---|---|
-| started_at | `2026-10-23T07:19:37.352242+00:00` |
+| started_at | `2026-09-04` |
 | provider | `groq` |
 | model_id | `openai/gpt-oss-120b` |
 | provider_config_hash | `72af3a5ba084b045` |
 | free_tier | `True` |
 | effort | `medium` |
-| code_commit | `2a25811` |
+| code_commit | `61d6ac4` |
 | eval_set_commit | `df52cc6` |
 | metrics_yaml_sha256 | `2bd082e4f63ef301f1c9afb00d2efb8f9913c0662b2d088dd4957b041a5ce9f0` |
 | confident_threshold | `0.7` |
@@ -22,8 +22,16 @@ Generated from `benchmark/runs/sweep-groq-r1/report.json` by `scripts/write_resu
 | cache_used | `True` |
 | complete | `True` |
 | policy_thresholds | `metric_score_margin=0.15, minimum_top_score=0.45` |
+| scored_at | `2026-10-23T09:39:05.424027+00:00` |
+| scoring_commit | `1b74a90` |
 
 **Threshold provenance.** UNVALIDATED: chosen a priori from the design and never fitted to data. No eval-set question was used, so refusal accuracy is not inflated by threshold leakage -- but the values have also never been checked against real model output. Run scripts/tune_thresholds.py against benchmark/dev/questions.yaml (14 held-out questions) to validate them.
+
+**When these answers were produced.** A free-tier sweep cannot finish inside one day's token cap, so this one ran across **6 sessions, 2026-09-04 to 2026-10-02**. `code_commit` names the last of them, not all of them — a single commit is a convenient fiction for a run that spans a month.
+
+These session dates are **reconstructed** from `data/quota_ledger.json`, which records live calls per UTC day, because this run predates per-session provenance recording. Earlier versions of the harness re-stamped `started_at` on every scoring pass, including passes that answered nothing, so the originally recorded value was overwritten and is not recoverable. Runs from this commit forward record each answering session as it happens and never restamp. Marked as reconstruction rather than presented as a log.
+
+**One unit was answered under later code: `am-08`.** It first died to a Groq TPM overage that the harness classified as a permanent failure; once that was reclassified as a transport error it was re-attempted and answered correctly. The intervening commits touched `benchmark/RESULTS.md`, `docs/03-failures.md`, `scripts/write_results.py`, `tests/`, and seven lines of `canon/agent/providers/implementations.py` — all of them additions to a `_TRANSPORT_MARKERS` tuple that is read only when loading a checkpoint to decide what to retry. The prompt, the metric cards, the compiler, the refusal policy and the scorer are byte-identical across the range, and `is_transport_error` is not reachable from the answer path at all. **`am-08` is therefore comparable, not contaminated**, and is included.
 
 ## Headline
 

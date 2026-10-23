@@ -65,9 +65,45 @@ class Provenance(BaseModel):
     model_config = _FROZEN
 
     started_at: str
+    """When the session that produced the ANSWERS began.
+
+    Preserved across re-scores. A resumed sweep re-aggregates from the checkpoint without
+    calling the model at all, and an earlier version re-stamped this field every time --
+    so re-scoring the September run on 2026-10-23 made it claim it ran that day. The
+    scoring session records itself in ``scored_at`` instead.
+    """
+
     code_commit: str
+    """HEAD when the answering session started. See ``answering_span`` for why a single
+    commit understates a sweep that could not finish inside one day's token budget."""
+
     eval_set_commit: str
     metrics_yaml_sha256: str
+
+    scored_at: str = ""
+    """When this report was last written. Differs from ``started_at`` whenever a finished
+    run is re-scored, which costs no quota and answers nothing."""
+
+    scoring_commit: str = ""
+    """HEAD at the last re-score. A change here with ``code_commit`` unchanged means the
+    numbers were re-derived by newer scoring code from the same answers."""
+
+    answering_sessions: tuple[str, ...] = ()
+    """Every session that answered at least one unit, oldest first, as
+    ``<iso timestamp>@<commit>``.
+
+    A free-tier sweep cannot finish inside one day's token cap, so it resumes across days
+    and a single ``code_commit`` is a convenient fiction. This records the truth. Empty on
+    runs that predate the field, where ``data/quota_ledger.json`` is the fallback record
+    of which UTC days had live calls.
+    """
+
+    @property
+    def answering_span(self) -> tuple[str, str] | None:
+        """First and last answering session, or None when only one (or none) is recorded."""
+        if len(self.answering_sessions) < 2:
+            return None
+        return self.answering_sessions[0], self.answering_sessions[-1]
 
     provider: str
     """Which backend answered. A result from one provider is not a result from another,
@@ -108,6 +144,24 @@ class Provenance(BaseModel):
 
 
 TUNING_RESULT = REPO_ROOT / "benchmark" / "dev" / "tuning_result.json"
+
+
+def _prior_provenance(out_dir: Path) -> dict[str, Any]:
+    """Answering provenance from an earlier session of this run, if there is one.
+
+    Returns ``{}`` for a new run. Read from the existing ``report.json`` so a resume or a
+    re-score inherits when the answers were actually produced rather than overwriting it
+    with the current clock.
+    """
+    report = out_dir / "report.json"
+    if not report.exists():
+        return {}
+    try:
+        payload = json.loads(report.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    existing = payload.get("provenance")
+    return existing if isinstance(existing, dict) else {}
 
 
 def threshold_provenance() -> str:
@@ -557,9 +611,17 @@ def main() -> int:
         return 1
 
     started = datetime.now(UTC)
+    head = _git("rev-parse", "--short", "HEAD")
+    prior = _prior_provenance(RUNS_DIR / (args.tag or ""))
+
     provenance = Provenance(
-        started_at=started.isoformat(),
-        code_commit=_git("rev-parse", "--short", "HEAD"),
+        # Preserved from the first answering session, so re-scoring a finished run does
+        # not restamp it with today's date and today's commit.
+        started_at=prior.get("started_at") or started.isoformat(),
+        code_commit=prior.get("code_commit") or head,
+        scored_at=started.isoformat(),
+        scoring_commit=head,
+        answering_sessions=tuple(prior.get("answering_sessions") or ()),
         eval_set_commit=_git("log", "-1", "--format=%h", "--", "benchmark/questions"),
         metrics_yaml_sha256=semantic_layer_hash(),
         provider=provenance_client.name,
@@ -611,6 +673,9 @@ def main() -> int:
     pipeline: CanonPipeline | None = None
     baseline: NaiveBaseline | None = None
     complete = True
+    answered_this_session = bool(pending)
+    """Whether this session produced any new answers. False on a pure re-score, which
+    must not add itself to the answering history or move ``started_at``."""
 
     try:
         for position, item in enumerate(pending, start=1):
@@ -730,12 +795,19 @@ def main() -> int:
         print("\n  no question has been answered by every arm yet; nothing to score")
 
     completed_units = len(done)
+    # Record this session only if it actually answered something. A re-score answers
+    # nothing and must not appear in the answering history.
+    sessions = provenance.answering_sessions
+    if answered_this_session:
+        sessions = (*sessions, f"{started.isoformat()}@{head}")
+
     provenance = provenance.model_copy(
         update={
             "complete": complete and completed_units == expected_units,
             "completed_units": completed_units,
             "expected_units": expected_units,
             "scored_questions": len(balanced),
+            "answering_sessions": sessions,
         }
     )
 

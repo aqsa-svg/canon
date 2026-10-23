@@ -18,7 +18,12 @@ import pytest
 from pydantic import ValidationError
 
 from benchmark.harness.dataset import Behavior, QuestionSet, Tier, load_questions
-from benchmark.harness.run import _load_checkpoint, provider_conflict
+from benchmark.harness.run import (
+    Provenance,
+    _load_checkpoint,
+    _prior_provenance,
+    provider_conflict,
+)
 from benchmark.harness.score import (
     Attribution,
     LiveLatency,
@@ -1184,3 +1189,61 @@ class TestLatencyCannotBeMisreported:
         assert result.live_latency.n == 2
         assert result.live_latency.cached == 3
         assert result.live_latency.untimed == 4
+
+
+class TestProvenanceIsNotRestamped:
+    """Fix: re-scoring a finished run must not claim it ran today.
+
+    The published run was re-scored on 2026-10-23 and its ``started_at`` moved to that
+    date, having already been overwritten several times before. A re-score costs no quota
+    and answers nothing, so it has no business touching when the answers were produced.
+    """
+
+    def test_a_rescore_inherits_the_answering_provenance(self, tmp_path: Path) -> None:
+        (tmp_path / "report.json").write_text(
+            json.dumps(
+                {
+                    "provenance": {
+                        "started_at": "2026-09-04",
+                        "code_commit": "61d6ac4",
+                        "answering_sessions": ["2026-09-04@abc1234"],
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+        prior = _prior_provenance(tmp_path)
+        assert prior["started_at"] == "2026-09-04"
+        assert prior["code_commit"] == "61d6ac4"
+        assert prior["answering_sessions"] == ["2026-09-04@abc1234"]
+
+    def test_a_new_run_has_no_prior_to_inherit(self, tmp_path: Path) -> None:
+        assert _prior_provenance(tmp_path) == {}
+
+    def test_a_corrupt_report_does_not_crash_the_run(self, tmp_path: Path) -> None:
+        """A damaged report must lose provenance, not block scoring."""
+        (tmp_path / "report.json").write_text("{not json", encoding="utf-8")
+        assert _prior_provenance(tmp_path) == {}
+
+    def test_the_answering_span_needs_two_sessions(self) -> None:
+        one = Provenance(
+            started_at="2026-09-04",
+            code_commit="a",
+            eval_set_commit="b",
+            metrics_yaml_sha256="c",
+            provider="groq",
+            provider_config_hash="d",
+            free_tier=True,
+            model_id="m",
+            effort="medium",
+            policy_thresholds=PolicyThresholds(),
+            threshold_provenance="x",
+            confident_threshold=0.7,
+            question_count=1,
+            runs=1,
+            cache_used=True,
+            answering_sessions=("2026-09-04@a",),
+        )
+        assert one.answering_span is None
+        many = one.model_copy(update={"answering_sessions": ("2026-09-04@a", "2026-10-02@b")})
+        assert many.answering_span == ("2026-09-04@a", "2026-10-02@b")
