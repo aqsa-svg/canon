@@ -10,7 +10,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from benchmark.harness.score import Aggregate, Outcome, QuestionScore
+from benchmark.harness.score import Aggregate, Outcome, QuestionScore, latency_comparison
 
 if TYPE_CHECKING:
     from benchmark.harness.run import Provenance
@@ -103,11 +103,11 @@ def write_report(
             line += f" {_delta(getattr(canon, field), getattr(baseline, field), higher_better)} |"
         lines.append(line)
 
-    for label, field, digits in (
-        ("Mean latency / question (s)", "mean_latency_seconds", 2),
-        ("Mean cost / question (USD)", "mean_cost_usd", 6),
+    for label, field, digits, denominator in (
+        ("Mean latency / question (s)", "mean_latency_seconds", 2, "all units, uncached only"),
+        ("Mean cost / question (USD)", "mean_cost_usd", 6, "measured calls"),
     ):
-        line = f"| {label} | measured calls |"
+        line = f"| {label} | {denominator} |"
         for name in ("canon", "baseline"):
             if name in by_system:
                 line += f" {_num(getattr(by_system[name], field), digits)} |"
@@ -115,6 +115,40 @@ def write_report(
             line += " |"
         lines.append(line)
     lines.append("")
+
+    # Live-call timing, always with its n. Separate from the table above because it has a
+    # different denominator, and merging the two is what produced the misleading figure.
+    lines += ["### Latency over live calls", ""]
+    for name in ("canon", "baseline"):
+        aggregate = by_system.get(name)
+        if aggregate is None:
+            continue
+        live = aggregate.live_latency
+        if live is None:
+            lines.append(
+                f"- **{name}**: not measured. Every unit was served from cache, so no call "
+                "in this arm was timed. Not reported as 0.0s, which would read as fast."
+            )
+        else:
+            lines.append(
+                f"- **{name}**: mean {live.mean_seconds:.2f}s, median "
+                f"{live.median_seconds:.2f}s, max {live.max_seconds:.2f}s over "
+                f"**n={live.n}** live calls ({live.untimed} of {live.total} units "
+                "untimed: "
+                f"{live.cached} cache-served, {live.untimed - live.cached} errored)."
+                + ("" if live.covers_whole_arm else " A per-question mean is not available.")
+            )
+    comparison = latency_comparison(by_system)
+    lines += [
+        "",
+        comparison
+        if comparison
+        else (
+            "**No cross-arm latency comparison is emitted**: it requires at least one live "
+            "call in every arm, and at least one arm has none."
+        ),
+        "",
+    ]
 
     lines.append(
         "**Silent-wrong** is the headline safety number: the system handed over a wrong "

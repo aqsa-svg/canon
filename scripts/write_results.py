@@ -16,10 +16,11 @@ from __future__ import annotations
 
 import argparse
 import json
-import statistics
 import sys
 from pathlib import Path
 from typing import Any
+
+from benchmark.harness.score import Aggregate, latency_comparison
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 RUNS_DIR = REPO_ROOT / "benchmark" / "runs"
@@ -40,60 +41,70 @@ def delta(canon: Any, baseline: Any, higher_is_better: bool) -> str:
     return f"{difference:+.1f}pp{marker}"
 
 
-def _latency_and_cost(tag: str) -> list[str]:
-    """Latency and cost, with the cache confound stated instead of averaged away.
+def _latency_and_cost(raw_aggregates: list[dict[str, Any]]) -> list[str]:
+    """Latency and cost, read from the harness's instrument rather than recomputed.
 
-    ``docs/01-evaluation.md`` pre-registered "mean latency / question" over *all*
-    questions. That denominator turns out to be wrong: a cache hit records 0.0 seconds, so
-    averaging over all questions reports a number that falls as the cache fills and is not
-    a timing of anything. Only live calls are timed, and the count of them is printed so
-    the figure can be weighed.
+    An earlier version of this function re-derived the timings from the per-question
+    ``.jsonl`` and hardcoded the sentence "every baseline unit was served from cache".
+    Both were wrong in the same way: a document that recomputes a metric can disagree with
+    the harness, and a document that asserts a fact about one run keeps asserting it after
+    the run changes. ``Aggregate.live_latency`` and ``latency_comparison`` are the single
+    source, and the prose below is derived from them.
     """
+    aggregates = {item["system"]: Aggregate(**item) for item in raw_aggregates}
 
     lines = [
         "## Latency and cost",
         "",
-        "Pre-registered in `docs/01-evaluation.md` over *all questions*. That denominator "
-        "is wrong and is corrected here: a cache hit records 0.0 seconds, so a mean over "
-        "all questions measures how full the cache is, not how fast the system is.",
+        "`docs/01-evaluation.md` pre-registered *mean latency / question* over all "
+        "questions. That denominator cannot be computed: a cache hit records 0.0 seconds, "
+        "so a mean over all questions measures how full the cache is. "
+        "`mean_latency_seconds` is therefore `None` unless every unit in the arm was "
+        "timed, and the timing that is defensible carries its own sample size.",
         "",
-        "| System | units | cache-served | live calls timed | mean | median | max |",
+        "| System | units | live calls timed | untimed | mean | median | max |",
         "|---|---|---|---|---|---|---|",
     ]
     for system in ("canon", "baseline"):
-        path = RUNS_DIR / tag / f"{system}.jsonl"
-        if not path.exists():
+        aggregate = aggregates.get(system)
+        if aggregate is None:
             continue
-        rows = [
-            json.loads(line)
-            for line in path.read_text(encoding="utf-8").splitlines()
-            if line.strip()
-        ]
-        cached = sum(1 for row in rows if row.get("cached"))
-        live = [
-            row["latency_seconds"]
-            for row in rows
-            if not row.get("cached") and row.get("latency_seconds")
-        ]
-        if live:
-            stats = (
-                f"{statistics.mean(live):.2f}s | {statistics.median(live):.2f}s | {max(live):.2f}s"
-            )
+        live = aggregate.live_latency
+        if live is None:
+            lines.append(f"| {system} | — | 0 | all | not measured | not measured | not measured |")
         else:
-            stats = "not measured | not measured | not measured"
-        lines.append(f"| {system} | {len(rows)} | {cached} | {len(live)} | {stats} |")
+            lines.append(
+                f"| {system} | {live.total} | {live.n} | {live.untimed} "
+                f"({live.cached} cached, {live.untimed - live.cached} errored) "
+                f"| {live.mean_seconds:.2f}s | {live.median_seconds:.2f}s "
+                f"| {live.max_seconds:.2f}s |"
+            )
+
+    comparison = latency_comparison(aggregates)
+    unmeasured = sorted(name for name, agg in aggregates.items() if agg.live_latency is None)
+    lines += [""]
+    if comparison:
+        lines += [f"**{comparison}**", ""]
+    else:
+        lines += [
+            "**No cross-arm latency comparison is emitted.** It requires at least one live "
+            "call in every arm, and "
+            + (
+                f"`{'`, `'.join(unmeasured)}` had none — every unit was served from cache, "
+                "so nothing in that arm was ever timed."
+                if unmeasured
+                else "at least one arm had none."
+            )
+            + " Reporting it as 0.0s, or printing one populated column and leaving it to "
+            "read as a comparison, would both be worse than saying so.",
+            "",
+        ]
 
     lines += [
-        "",
-        "**No cross-arm latency comparison is possible from this run.** Every baseline "
-        "unit was served from cache, so the baseline has no live timing at all. Reporting "
-        "its mean as 0.0s, or omitting the row and leaving Canon's figure to look like a "
-        "comparison, would both be worse than saying so.",
-        "",
-        "**Mean cost per question is $0.00 for both arms**, and that is the whole point of "
-        "the free-tier constraint rather than a rounding artefact: the provider bills "
-        "nothing at this tier, so reproducing the benchmark costs nothing. The token spend "
-        "it replaces is the real resource, and `data/quota_ledger.json` records it per UTC "
+        "**Mean cost per question is $0.00 for both arms**, and that is the free-tier "
+        "constraint working rather than a rounding artefact: the provider bills nothing at "
+        "this tier, so reproducing the benchmark costs nothing. The token spend it "
+        "replaces is the real resource, and `data/quota_ledger.json` records it per UTC "
         "day.",
         "",
     ]
@@ -402,7 +413,7 @@ def main() -> int:
             lines.append("")
     lines.append("")
 
-    lines += _latency_and_cost(args.tag)
+    lines += _latency_and_cost(payload["aggregates"])
 
     # ---------------------------------------------------------------- caveats
     lines += [

@@ -23,6 +23,8 @@ unlike confident-wrong it needs no imputed confidence for a system that reports 
 
 from __future__ import annotations
 
+import statistics
+from collections.abc import Mapping, Sequence
 from decimal import Decimal
 from enum import StrEnum
 from typing import Any
@@ -345,6 +347,47 @@ class QuestionScore(BaseModel):
         return self.outcome is Outcome.ASKED and not self.expected_behavior.should_answer
 
 
+class LiveLatency(BaseModel):
+    """Latency over live calls, inseparable from the sample it was measured on.
+
+    ``n`` is not optional and not a separate field a caller can forget to print: anything
+    rendering this model has the denominator in hand. That is the whole design -- the
+    previous shape was a bare float, and a bare float is exactly what gets quoted without
+    its sample size.
+    """
+
+    model_config = _FROZEN
+
+    n: int = Field(gt=0)
+    """Live calls timed. Greater than zero by construction; an arm with none gets
+    ``live_latency=None`` rather than an n of 0."""
+
+    cached: int = Field(ge=0)
+    """Units served from cache and therefore never timed. Printed beside ``n`` so the
+    coverage of the measurement is visible."""
+
+    total: int = Field(gt=0)
+    """Units in the arm. Carried explicitly rather than inferred as ``n + cached``, which
+    undercounts: a unit can be neither cached nor timed -- an errored one records no
+    latency -- and the first version of this model rendered "36 of 78 units" for an arm of
+    80 for exactly that reason.
+    """
+
+    mean_seconds: float
+    median_seconds: float
+    max_seconds: float
+
+    @property
+    def untimed(self) -> int:
+        """Units with no timing, whether cached or errored."""
+        return self.total - self.n
+
+    @property
+    def covers_whole_arm(self) -> bool:
+        """Whether every unit was timed, i.e. whether a per-question mean would be sound."""
+        return self.n == self.total
+
+
 class Aggregate(BaseModel):
     """The report table from §4. Rates are None when the denominator is zero."""
 
@@ -404,6 +447,22 @@ class Aggregate(BaseModel):
     error_rate: float | None = None
 
     mean_latency_seconds: float | None = None
+    """``None`` whenever ANY unit in the arm was cache-served, which is almost always.
+
+    This field once averaged live calls over the live-call count while the *label* said
+    "mean latency / question", and an arm with 36 of 80 units replayed from cache reported
+    2.869s as though it were a per-question timing. The number was not wrong so much as
+    unlabelled, and a reader had no way to see the dilution.
+
+    A partially cached arm has no defensible per-question latency: the cached units were
+    never timed, and imputing anything to them -- 0.0, or the live mean -- invents data. So
+    the field reports nothing at all, and the timing that IS defensible moves to
+    ``live_latency``, where it cannot be read without its sample size.
+    """
+
+    live_latency: LiveLatency | None = None
+    """Timing over live calls only, carrying its own n. ``None`` when nothing was timed."""
+
     mean_cost_usd: float | None = None
     cached_fraction: float | None = None
 
@@ -422,6 +481,44 @@ class TierAggregate(BaseModel):
     behavior_accuracy: float | None = None
     silent_wrong_rate: float | None = None
     confident_wrong_rate: float | None = None
+
+
+def _live_latency(scores: Sequence[QuestionScore]) -> LiveLatency | None:
+    """Timing over live calls only, or None when nothing in this arm was timed.
+
+    A cache hit records 0.0 seconds, so it is excluded rather than averaged in. An arm
+    served entirely from cache -- which the published baseline arm was, 80 of 80 -- yields
+    None, because "we did not measure this" and "this was fast" must not render alike.
+    """
+    timed = [s.latency_seconds for s in scores if not s.cached and s.latency_seconds]
+    if not timed:
+        return None
+    return LiveLatency(
+        n=len(timed),
+        cached=sum(1 for s in scores if s.cached),
+        total=len(scores),
+        mean_seconds=round(statistics.mean(timed), 3),
+        median_seconds=round(statistics.median(timed), 3),
+        max_seconds=round(max(timed), 3),
+    )
+
+
+def latency_comparison(aggregates: Mapping[str, Aggregate]) -> str | None:
+    """A cross-arm latency comparison, or None when the data cannot support one.
+
+    Emitted only when every arm has at least one live call. The published run cannot
+    support it -- the baseline was wholly cache-served -- and the correct output there is
+    nothing at all, not a table with one populated column that reads as a comparison.
+    """
+    live = {name: agg.live_latency for name, agg in aggregates.items()}
+    if not live or any(value is None for value in live.values()):
+        return None
+    parts = [
+        f"{name} {value.mean_seconds:.2f}s (n={value.n})"
+        for name, value in sorted(live.items())
+        if value is not None
+    ]
+    return "Mean latency over live calls: " + ", ".join(parts) + "."
 
 
 def _rate(numerator: int, denominator: int) -> float | None:
@@ -682,9 +779,15 @@ def aggregate(system: str, scores: list[QuestionScore], questions: QuestionSet) 
         ),
         confident_wrong_rate=_rate(sum(1 for s in scores if s.confident_wrong), len(scores)),
         error_rate=_rate(sum(1 for s in scores if s.outcome is Outcome.ERRORED), len(scores)),
+        # None unless EVERY unit was timed. A partially cached arm has no per-question
+        # latency, so the field refuses to produce one rather than reporting a mean whose
+        # denominator differs from its label.
         mean_latency_seconds=(
-            round(sum(s.latency_seconds for s in measured) / len(measured), 3) if measured else None
+            round(sum(s.latency_seconds for s in measured) / len(measured), 3)
+            if measured and len(measured) == len(scores)
+            else None
         ),
+        live_latency=_live_latency(scores),
         mean_cost_usd=(
             round(sum(s.cost_usd for s in measured) / len(measured), 6) if measured else None
         ),

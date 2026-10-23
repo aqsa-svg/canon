@@ -15,11 +15,13 @@ from decimal import Decimal
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 
 from benchmark.harness.dataset import Behavior, QuestionSet, Tier, load_questions
 from benchmark.harness.run import _load_checkpoint, provider_conflict
 from benchmark.harness.score import (
     Attribution,
+    LiveLatency,
     Outcome,
     QuestionScore,
     actual_behavior,
@@ -30,6 +32,7 @@ from benchmark.harness.score import (
     cells_equal,
     confident_wrong_curve,
     gold_collision_report,
+    latency_comparison,
     order_matters,
     paired_discrimination,
     rows_match,
@@ -1088,3 +1091,96 @@ class TestTransportErrorsAreNotFindings:
             encoding="utf-8",
         )
         assert "canon|0|t1-01" in _load_checkpoint(path)
+
+
+class TestLatencyCannotBeMisreported:
+    """Fix: the instrument must not be able to state what the data does not support.
+
+    A published arm once reported ``mean_latency_seconds = 2.869`` under the label "mean
+    latency / question" while 36 of its 80 units were cache replays recording 0.0s. The
+    document was corrected by hand; these tests correct the thing that produced it.
+    """
+
+    def _score(self, *, cached: bool, latency: float) -> QuestionScore:
+        return QuestionScore(
+            question_id="x",
+            question="q",
+            tier="1",
+            expected_behavior=Behavior.ANSWER,
+            outcome=Outcome.ANSWERED,
+            cached=cached,
+            latency_seconds=latency,
+        )
+
+    def _questions(self) -> QuestionSet:
+        return QuestionSet(questions=())
+
+    def test_a_fully_cached_arm_has_no_live_latency(self) -> None:
+        """None, not 0.0: "we did not measure" must not render like "it was fast"."""
+        scores = [self._score(cached=True, latency=0.0) for _ in range(5)]
+        result = aggregate("baseline", scores, self._questions())
+        assert result.live_latency is None
+        assert result.mean_latency_seconds is None
+
+    def test_a_partly_cached_arm_refuses_a_per_question_mean(self) -> None:
+        """The exact shape of the published Canon arm: some live, most replayed."""
+        scores = [self._score(cached=False, latency=3.0) for _ in range(2)]
+        scores += [self._score(cached=True, latency=0.0) for _ in range(3)]
+        result = aggregate("canon", scores, self._questions())
+        assert result.mean_latency_seconds is None, "a diluted mean must not be produced"
+        assert result.live_latency is not None
+        assert result.live_latency.n == 2
+        assert result.live_latency.cached == 3
+        assert not result.live_latency.covers_whole_arm
+
+    def test_a_fully_live_arm_does_get_a_per_question_mean(self) -> None:
+        """The field is not disabled -- it is conditioned on the denominator holding."""
+        scores = [self._score(cached=False, latency=2.0) for _ in range(4)]
+        result = aggregate("canon", scores, self._questions())
+        assert result.mean_latency_seconds == 2.0
+        assert result.live_latency is not None
+        assert result.live_latency.covers_whole_arm
+
+    def test_live_latency_cannot_exist_without_its_sample_size(self) -> None:
+        """n is required and positive, so the figure cannot be quoted bare."""
+        with pytest.raises(ValidationError):
+            LiveLatency(
+                n=0, cached=5, total=5, mean_seconds=3.0, median_seconds=3.0, max_seconds=3.0
+            )
+
+    def test_no_cross_arm_comparison_when_one_arm_is_fully_cached(self) -> None:
+        """The published run's case: the baseline was 80/80 cache-served."""
+        live = aggregate(
+            "canon",
+            [self._score(cached=False, latency=3.0)],
+            self._questions(),
+        )
+        dead = aggregate(
+            "baseline",
+            [self._score(cached=True, latency=0.0)],
+            self._questions(),
+        )
+        assert latency_comparison({"canon": live, "baseline": dead}) is None
+
+    def test_a_comparison_is_emitted_when_both_arms_have_live_calls(self) -> None:
+        one = aggregate("canon", [self._score(cached=False, latency=3.0)], self._questions())
+        two = aggregate("baseline", [self._score(cached=False, latency=1.0)], self._questions())
+        comparison = latency_comparison({"canon": one, "baseline": two})
+        assert comparison is not None
+        assert "n=1" in comparison
+
+    def test_the_arm_size_is_carried_not_inferred(self) -> None:
+        """Regression: an errored unit is neither cached nor timed.
+
+        The first version of this model rendered "36 of 78 units" for an arm of 80,
+        because it inferred the denominator as n + cached.
+        """
+        scores = [self._score(cached=False, latency=3.0) for _ in range(2)]
+        scores += [self._score(cached=True, latency=0.0) for _ in range(3)]
+        scores.append(self._score(cached=False, latency=0.0))  # errored: no timing at all
+        result = aggregate("canon", scores, self._questions())
+        assert result.live_latency is not None
+        assert result.live_latency.total == 6
+        assert result.live_latency.n == 2
+        assert result.live_latency.cached == 3
+        assert result.live_latency.untimed == 4

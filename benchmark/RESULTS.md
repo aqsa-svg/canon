@@ -6,13 +6,13 @@ Generated from `benchmark/runs/sweep-groq-r1/report.json` by `scripts/write_resu
 
 | Field | Value |
 |---|---|
-| started_at | `2026-10-02T05:59:02.173122+00:00` |
+| started_at | `2026-10-23T07:19:37.352242+00:00` |
 | provider | `groq` |
 | model_id | `openai/gpt-oss-120b` |
 | provider_config_hash | `72af3a5ba084b045` |
 | free_tier | `True` |
 | effort | `medium` |
-| code_commit | `f490b7e` |
+| code_commit | `2a25811` |
 | eval_set_commit | `df52cc6` |
 | metrics_yaml_sha256 | `2bd082e4f63ef301f1c9afb00d2efb8f9913c0662b2d088dd4957b041a5ce9f0` |
 | confident_threshold | `0.7` |
@@ -139,16 +139,16 @@ When a system returns a wrong number, the harness checks whether that number is 
 
 ## Latency and cost
 
-Pre-registered in `docs/01-evaluation.md` over *all questions*. That denominator is wrong and is corrected here: a cache hit records 0.0 seconds, so a mean over all questions measures how full the cache is, not how fast the system is.
+`docs/01-evaluation.md` pre-registered *mean latency / question* over all questions. That denominator cannot be computed: a cache hit records 0.0 seconds, so a mean over all questions measures how full the cache is. `mean_latency_seconds` is therefore `None` unless every unit in the arm was timed, and the timing that is defensible carries its own sample size.
 
-| System | units | cache-served | live calls timed | mean | median | max |
+| System | units | live calls timed | untimed | mean | median | max |
 |---|---|---|---|---|---|---|
-| canon | 80 | 36 | 42 | 3.01s | 2.33s | 8.72s |
-| baseline | 80 | 80 | 0 | not measured | not measured | not measured |
+| canon | 80 | 42 | 38 (36 cached, 2 errored) | 3.01s | 2.33s | 8.72s |
+| baseline | — | 0 | all | not measured | not measured | not measured |
 
-**No cross-arm latency comparison is possible from this run.** Every baseline unit was served from cache, so the baseline has no live timing at all. Reporting its mean as 0.0s, or omitting the row and leaving Canon's figure to look like a comparison, would both be worse than saying so.
+**No cross-arm latency comparison is emitted.** It requires at least one live call in every arm, and `baseline` had none — every unit was served from cache, so nothing in that arm was ever timed. Reporting it as 0.0s, or printing one populated column and leaving it to read as a comparison, would both be worse than saying so.
 
-**Mean cost per question is $0.00 for both arms**, and that is the whole point of the free-tier constraint rather than a rounding artefact: the provider bills nothing at this tier, so reproducing the benchmark costs nothing. The token spend it replaces is the real resource, and `data/quota_ledger.json` records it per UTC day.
+**Mean cost per question is $0.00 for both arms**, and that is the free-tier constraint working rather than a rounding artefact: the provider bills nothing at this tier, so reproducing the benchmark costs nothing. The token spend it replaces is the real resource, and `data/quota_ledger.json` records it per UTC day.
 
 ## What these numbers do and do not mean
 
