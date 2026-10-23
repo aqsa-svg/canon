@@ -268,6 +268,82 @@ question by question rather than merely visible as a moved aggregate.
 
 ---
 
+## Pre-registration — the Gemini cross-model arm
+
+**Written and committed before the first Gemini call.** Nothing in this section has been
+informed by Gemini output; the git history is the evidence, and if a figure here ever
+disagrees with `RESULTS.md`, this document is the one that was fixed in advance.
+
+**Why this section exists.** The Groq run changed its primary endpoint after seeing
+baseline data — defensible, disclosed above, and still in-sample. Declaring the *same*
+endpoint for Gemini in advance makes the cross-model arm an **out-of-sample test of that
+choice**. If silent-wrong behaves on Gemini as it did on Groq, the switch was a better
+instrument rather than a lucky fit to one run's data. If it does not, that is a finding
+about the metric and it gets reported as one. Either way the deviation above stops being a
+liability and becomes evidence that I understood what it cost — but only because this was
+written first.
+
+### Primary endpoint, declared in advance
+
+**Silent-wrong rate** — a wrong number handed over with neither a verification flag nor a
+clarifying question attached. Denominator: all questions. It compares observable behaviour
+and needs no assumption about either system's confidence.
+
+**Confident-wrong rate is secondary**, carrying the same footnote it carries on Groq: the
+baseline reports no confidence, so each of its answers is imputed at 1.0. Defensible — an
+unhedged figure is an assertion — but an imputation, which is why it is not the headline.
+
+### The full metric table, fixed now
+
+| Metric | Denominator |
+|---|---|
+| **Silent-wrong rate** (primary) | all questions |
+| Execution accuracy | answerable questions |
+| Shape accuracy (columns + grain) | answerable questions |
+| Semantic accuracy | answerable, measurable |
+| Behaviour accuracy (3x3 diagonal) | all questions |
+| Refusal accuracy | all questions |
+| — under-refusal rate | should-not-answer questions |
+| — over-refusal rate | answerable questions |
+| — names the fork (proxy) | should-not-answer questions |
+| Caveat surfaced | cases requiring one |
+| Paired discrimination | 3 pairs, both halves |
+| Confident-wrong rate (secondary) | all questions |
+| Error rate | all questions |
+| Latency over live calls | live calls only, with n |
+
+`mean_latency_seconds` is reported only if every unit in an arm was timed, and a cross-arm
+latency comparison only if every arm has at least one live call. On a resumed, cached run
+both will usually be absent, and absent is the correct output.
+
+### Rules fixed in advance
+
+- **Complete arms only.** No Gemini figure is published until both arms are whole. A
+  partial arm is not reported, not averaged, and not previewed with a caveat.
+- **Interleaved by question.** Canon and the baseline answer each question before the run
+  moves to the next, so any quota stop leaves a balanced, scoreable pair. The Groq run
+  completed one arm then the other and left a whole baseline with nothing to compare it
+  against for days.
+- **No provider mixing inside a comparison.** Enforced by the harness guard, which refuses
+  a checkpoint containing two providers. A Canon-on-Gemini versus baseline-on-Groq delta
+  would measure the backend.
+- **Groq is not re-run.** The Groq numbers stand as published; Gemini is a second arm, not
+  a replacement, and the comparison of interest is whether the *direction* holds across
+  models, not whether the levels match.
+- **Quota limits are recorded as observed**, with the same discipline as the Groq
+  `verified` flag: a limit is `verified` only when the provider itself refused and quoted
+  it. A limit this project's own limiter enforced is config checked against itself.
+
+### Declared in advance: what would falsify the claim
+
+The project claims a canonical layer reduces silent-wrong answers. On Gemini that claim is
+wrong if **the baseline's silent-wrong rate is not materially higher than Canon's**. With
+80 questions one question is 1.25 points, so "materially" means a gap that survives being
+a few questions wide — not a one-question edge. A null or reversed result is published in
+`RESULTS.md` with the same prominence as a positive one.
+
+---
+
 ## Deviations from this pre-registration
 
 This document was written before the code it evaluates, and the table above still reads
@@ -316,6 +392,17 @@ strategies a system could otherwise game.
 **What did not change:** the question set, the tiers, the gold answers, the refusal
 thresholds (`metric_score_margin=0.15`, `minimum_top_score=0.45`, both chosen a priori and
 never fitted), and the rule that a confident wrong answer is worse than a refusal.
+
+**What deviation 1 costs, and how the Gemini arm repays it.** Changing a primary endpoint
+after seeing data makes that endpoint *in-sample*: silent-wrong was chosen partly because
+of what the Groq baseline turned out to do, so its good behaviour on Groq is not
+independent evidence that it is the better instrument. The section above fixes that by
+declaring silent-wrong as the primary endpoint for the Gemini arm **in advance**, in a
+commit that precedes the first Gemini call. That makes the cross-model arm an out-of-sample
+test of the choice. If it holds, the switch was an improvement in instrumentation rather
+than a fit to one run; if it does not, that is reported as a finding about the metric. This
+is the whole reason the Gemini pre-registration was written before any Gemini quota was
+spent rather than alongside the results.
 
 ---
 
