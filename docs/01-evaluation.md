@@ -270,6 +270,13 @@ question by question rather than merely visible as a moved aggregate.
 
 ## Pre-registration — the Gemini cross-model arm
 
+> **STATUS: PRE-REGISTERED, NOT RUN.** No Gemini arm exists. The project has one free
+> provider key, and the decision was to spend the remaining budget on Groq rather than add
+> a second model. This section is kept rather than deleted because a pre-registration that
+> is removed when the study does not happen is worth nothing — the point of writing it in
+> advance is that it stays on the record either way. If the arm is ever run, it runs to
+> this specification, and the git history shows this was fixed beforehand.
+
 **Written and committed before the first Gemini call.** Nothing in this section has been
 informed by Gemini output; the git history is the evidence, and if a figure here ever
 disagrees with `RESULTS.md`, this document is the one that was fixed in advance.
@@ -393,16 +400,24 @@ strategies a system could otherwise game.
 thresholds (`metric_score_margin=0.15`, `minimum_top_score=0.45`, both chosen a priori and
 never fitted), and the rule that a confident wrong answer is worse than a refusal.
 
-**What deviation 1 costs, and how the Gemini arm repays it.** Changing a primary endpoint
+**What deviation 1 costs, and why it is still outstanding.** Changing a primary endpoint
 after seeing data makes that endpoint *in-sample*: silent-wrong was chosen partly because
-of what the Groq baseline turned out to do, so its good behaviour on Groq is not
-independent evidence that it is the better instrument. The section above fixes that by
-declaring silent-wrong as the primary endpoint for the Gemini arm **in advance**, in a
-commit that precedes the first Gemini call. That makes the cross-model arm an out-of-sample
-test of the choice. If it holds, the switch was an improvement in instrumentation rather
-than a fit to one run; if it does not, that is reported as a finding about the metric. This
-is the whole reason the Gemini pre-registration was written before any Gemini quota was
-spent rather than alongside the results.
+of what the Groq baseline turned out to do, so its good behaviour on Groq is **not
+independent evidence** that it is the better instrument. The intended repair was a
+cross-model arm pre-registered in advance, which would have made the choice testable
+out-of-sample. That pre-registration exists and is committed, but **the arm was not run**,
+so the repair has not been collected.
+
+State of the claim, plainly: silent-wrong is a better-justified metric than confident-wrong
+*by argument* — it needs no imputation, and that argument stands on its own. It is not
+better-justified *by evidence*, because the only run it has been measured on is the one
+that motivated it. A reader is entitled to discount it accordingly, and the fact that
+silent-wrong and confident-wrong happen to coincide on this run (2.5% / 68.8%) is
+reassurance, not a test: they coincide because no Canon answer was both wrong and
+confidently delivered, which is a property of this result rather than of the metrics.
+
+This is the single largest unaddressed methodological weakness in the project, and it is
+cheap to fix later: one key, one pre-registered arm, no change to any code.
 
 ---
 
