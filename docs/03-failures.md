@@ -206,6 +206,24 @@ answer and is scored a failure.** This is an eval-set weakness of the same speci
 `t1-04` in section D, and it is left as written for the same reason: editing a question
 after seeing it cost Canon a point is worse than reporting the point.
 
+**Three independent lines of evidence now land on `t2-05`, which is why I believe the
+diagnosis rather than just asserting it.** (1) Reading the clarifying question: it names
+`customer_state` against `seller_state`, a fork my gold resolves without justifying.
+(2) The two-stage ablation answered it where single-stage asked, and I discounted that as
+a win for exactly this reason. (3) [`benchmark/VARIANCE.md`](../benchmark/VARIANCE.md):
+across two independent samples of 24 questions at temperature 0, **`t2-05` is the only
+question that flipped** — asked in one run, answered in the other.
+
+That third one is the useful one, because it is mechanical and I did not choose it. A
+question that lands on either side of the policy margin across identical runs is a
+question the model is genuinely undecided about, which is what "ambiguous" means
+operationally. The eval set says it has one right answer; the system says it is a coin
+flip; the system is closer to right.
+
+It also means Canon's published **over-refusal rate of 5.5% is the one headline figure
+with demonstrated sample-dependence** — 3/55 on the published draw, 2/55 had `t2-05`
+landed the other way, a swing of 1.8pp.
+
 ### C2. Under-refusal — answered when it should have asked
 
 **Baseline: 18 of 25**, verified over the complete arm. It used its `CLARIFY` option on 7

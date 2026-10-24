@@ -439,7 +439,19 @@ def main() -> int:
         lines.append("")
 
     # ---------------------------------------------------------------- variance
-    lines += ["## Variance across runs", ""]
+    lines += [
+        "## Variance across runs",
+        "",
+        "Every figure above is a **single sample**. A separate probe re-ran `canon` twice "
+        "over the 24-question stratified subset at temperature 0 and is reported in "
+        "[`VARIANCE.md`](VARIANCE.md). One question of 24 flipped: `t2-05`, which is also "
+        "the question `docs/03-failures.md` §C1 independently identifies as one where the "
+        "clarifying question is better than the gold. **Over-refusal is therefore the one "
+        "headline figure with demonstrated sample-dependence** — 5.5% on this draw, 3.6% "
+        "had `t2-05` landed the other way. The remaining 23 subset questions were stable "
+        "across both samples, and the other 56 questions are unmeasured.",
+        "",
+    ]
     for name, data in variance.items():
         if data.get("rates") is None:
             lines.append(
