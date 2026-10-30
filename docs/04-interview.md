@@ -5,8 +5,11 @@ Every answer ends with **the weakest point** — where a sharp follow-up would l
 lines are deliberately unflattering; a defence I can't puncture myself is a defence I
 haven't tested.
 
-Results questions are not here. They need numbers, and numbers wait for
-[`benchmark/RESULTS.md`](../benchmark/RESULTS.md).
+Design questions come first, then the results questions, which were held back until there
+were numbers to defend. There are now: see
+[`benchmark/RESULTS.md`](../benchmark/RESULTS.md),
+[`benchmark/ABLATION.md`](../benchmark/ABLATION.md) and
+[`benchmark/VARIANCE.md`](../benchmark/VARIANCE.md).
 
 ---
 
@@ -103,13 +106,25 @@ daily budget) and becomes untenable around 200–500. Above that I'd reach for a
 fetched by name, which keeps selection inside an enum and so keeps the wrong-card failure
 loud instead of silent.
 
-**Weakest point.** The 100-metric crossover is arithmetic on prompt size, not a measured
-accuracy curve — I have no evidence that selection accuracy holds at 50 or 100 cards, and
-it's entirely plausible that a model's ability to discriminate degrades well before the
-token budget does. If that's true the crossover is *lower* than I claim and my argument
-protects the wrong quantity. The two-stage ablation was meant to give a first data point
-and it hasn't run yet, so this ADR is currently the most confidently-argued and least
-empirically-supported thing in the repo.
+**The ablation has since run, and it cuts both ways.** Two-stage — short cards to choose,
+full card to fill — matched full stuffing on the 24-question subset: paired discrimination
+3/3 against 3/3, no question answered worse. The token saving is real and, on that subset,
+free. But it only matched *after* a fix, and the fix is the part worth repeating here.
+Iteration 1 lost three questions because stage A's schema (`MetricSelection`) has no
+`time_grain` field, so asked for revenue "by month" it looked for `month` among the
+breakdown dimensions, failed to find it, and declined. **The general form is that stage A
+can only reason about what its own schema lets it express** — the same hazard as
+retrieval, one layer up. Notably it argues *for* the thesis rather than against it: the
+failure was a loud over-refusal, not a confident wrong number, because the metric enum
+still bounded what could be said. Narrowing what the model sees is survivable when the
+narrowing is visible to it and dangerous when it isn't.
+
+**Weakest point.** The 100-metric crossover is still arithmetic on prompt size, not a
+measured accuracy curve. The ablation varied *prompt structure* at a fixed catalogue size;
+it says nothing about whether selection accuracy holds at 50 or 100 cards, and it remains
+plausible that discrimination degrades well before the token budget does. The ablation is
+also 24 questions, where one question moves any rate by 4.2 points. Better supported than
+it was, and still the thinnest empirical claim in the repo.
 
 ---
 
@@ -184,7 +199,77 @@ very different promises, and the README currently blurs them.
 
 ---
 
+## Results questions
+
+### 8. Your baseline scores 32.7% execution against Canon's 90.9%. Is it a strawman?
+
+The fair version of this challenge is specific: did I cripple it? The baseline gets the
+real DDL, writes its own SQL, runs on the same model and provider, and — unusually for a
+text-to-SQL baseline — gets **explicit permission to refuse**, which it uses on seven
+questions. So it is not a strawman in the sense of being denied a capability Canon has.
+
+What it is denied is the metric cards, and that is the entire experiment. The result that
+makes the comparison interpretable is not the execution gap but the pair: **96.4% shape
+accuracy against 32.7% execution.** It asks for the right columns at the right grain and
+then computes them under the wrong definition — overwhelmingly a missing default filter,
+like summing `price` without excluding canceled orders. It is not confused about the
+question; it is confused about what "revenue" means, which is the one thing a canonical
+layer supplies.
+
+**Weakest point.** "Right definition" means *my* definition. A baseline scoring 32.7%
+against someone else's metric cards is not evidence about the baseline's competence, it is
+evidence that definitional conventions are not guessable — a weaker and more interesting
+claim than the number suggests. And a stronger baseline (few-shot examples, or the DDL plus
+a page of prose conventions) would close some of that gap; I did not build one, so I cannot
+say how much.
+
+### 9. Everything is n=1. How do you know these numbers are stable?
+
+For the most part I don't, and `RESULTS.md` says so rather than printing a zero spread.
+What I did measure is a targeted probe: `canon` re-run over the 24-question stratified
+subset at temperature 0, reported in [`VARIANCE.md`](../benchmark/VARIANCE.md). **23 of 24
+questions were identical across samples. One flipped — `t2-05`** — which makes over-refusal
+the one headline figure with demonstrated sample-dependence: 5.5% on the published draw,
+3.6% had it landed the other way.
+
+The flip is the useful part. `t2-05` is the question I had already flagged, on separate
+evidence, as one where Canon's clarifying question is better than my gold — "net revenue in
+São Paulo state" does not say whether that means `customer_state` or `seller_state`, and
+both exist. A question that lands either side of the policy margin across identical runs is
+one the model is genuinely undecided about, which is what ambiguous means operationally.
+
+**Weakest point.** Two samples, one arm, 24 of 80 questions, on a subset deliberately
+chosen to be *sensitive* rather than representative. That is enough to catch a coin-flip
+question and nowhere near enough to put an error bar on a published rate. The baseline has
+no variance measurement at all, despite using its own `CLARIFY` option on seven questions,
+so it is not obviously stable either.
+
+---
+
 ## The one I'd least like to be asked
+
+> *You changed your primary endpoint after seeing the baseline's results, said a
+> cross-model arm would make that choice testable out-of-sample, and then never ran it.
+> Why should I trust the headline?*
+
+This one has no good answer, which is why it is first. The facts are as stated: the plan in
+[`docs/01-evaluation.md`](01-evaluation.md) bolded **confident-wrong** as primary; the
+published report leads on **silent-wrong**, a metric that did not exist when the plan was
+written. The reason is sound — the baseline reports no confidence, so scoring its answers
+at 1.0 is an imputation, and silent-wrong needs no such assumption — but I found that
+reason by running the baseline. That makes silent-wrong **in-sample**. I pre-registered it
+for a Gemini arm precisely so the choice could be tested out-of-sample, and that arm was
+not run, so the debt is still outstanding.
+
+What I can say: the argument for silent-wrong stands independently of the data, the
+deviation is disclosed in the document that pre-registered the alternative rather than
+discovered by a reader, and both numbers are reported. What I cannot say is that it has
+been validated. The two metrics coinciding on this run (2.5% / 68.8%) is not reassurance
+either — they coincide because no Canon answer was both wrong and confidently delivered,
+which is a property of this result, not of the metrics. It is one key and one pre-registered
+arm away from being settled, and until then a reader is entitled to discount it.
+
+## The other one I'd least like to be asked
 
 > *You wrote the metric cards, the questions, and the gold answers. What in this repo
 > would tell me you're wrong about what "revenue" means?*
