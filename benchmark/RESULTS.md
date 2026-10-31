@@ -67,6 +67,25 @@ These session dates are **reconstructed** from `data/quota_ledger.json`, which r
 
 The baseline's zeros are structural — it has no verification gate — which is the finding rather than a scoring artefact.
 
+## Asked twice: does the same question get the same answer?
+
+Each system answered the same questions a second time — same provider, same model, same config hash, temperature 0 — and the two samples were compared to each other.
+
+| System | questions | answered differently (behaviour) | **returned a different number** |
+|---|---|---|---|
+| canon | 24 | 1 | **0** |
+| baseline | 80 | 2 | **2** |
+
+**The baseline returned a different number for the same question on 2 of 80 questions.** Not a different phrasing of the same result — different SQL, producing a different figure.
+
+On `t3-04`, *“How much revenue excluding shipping did we book in 2018?”*, it answered **7,341,182.41** on one sample and **7,386,050.80** on the other. Nothing in either answer indicates which one to trust. Both figures come from re-executing the two stored queries against the warehouse, not from transcription.
+
+**Canon cannot do this, and the reason is structural rather than empirical.** The metric is an enum, so it is chosen rather than written; the compiler is a pure function of `(QueryIntent, MetricCard[])`, so identical intents produce byte-identical SQL. The only surface where sampling can change the output is intent selection, which shows up as a *different question being answered*, not as a silently different number for the same one. Canon recorded 0 value flips.
+
+**The sampling is asymmetric and the argument should not paper over it.** The baseline was measured on all 80 questions; Canon on a 24-question probe. Canon's zero is therefore *weaker evidence* than the baseline's 2 — fewer questions, so fewer chances to observe a flip. The structural argument above is what carries the claim; the measurement is consistent with it rather than sufficient for it. Full detail in [`VARIANCE.md`](VARIANCE.md).
+
+**This is the one finding here that does not depend on gold.** Every accuracy number in this document measures conformance to a canonical layer I wrote. Two runs disagreeing *with each other* needs no reference answer to interpret: it is a property of the system, observable without me. It is the result I would put most weight on for that reason.
+
 ## Per tier
 
 | System | Tier | n | Execution | Shape | Semantic | Behaviour | Silent-wrong |

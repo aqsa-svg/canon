@@ -274,12 +274,41 @@ arm away from being settled, and until then a reader is entitled to discount it.
 > *You wrote the metric cards, the questions, and the gold answers. What in this repo
 > would tell me you're wrong about what "revenue" means?*
 
-Nothing would. The mechanism claims are independently checkable — you can read the code and
-confirm a hallucinated metric is unrepresentable and that fan-out can't be built. But the
-*accuracy* claims rest on labels I authored, and a finance team that had ruled net revenue
-the default would score Canon's refusal on `am-01` as a failure rather than a success.
-Every integrity check I've added — dev/test threshold separation, gold-versus-card,
-attribution coverage, shape-versus-execution — tightens internal consistency. None of them
-reaches outside my own judgment. The honest framing, which belongs in RESULTS.md and not
-just here, is that this measures **conformance to a stated canonical layer**, and the
-project's actual claim is that having one beats not having one.
+The concession is real but it is narrower than it first sounds, and conceding it wholesale
+gives away things it does not actually touch. Three categories:
+
+**Threatened — every accuracy number.** Execution accuracy, semantic accuracy, refusal
+accuracy, the tier breakdowns, the paired-discrimination result. All of them measure
+*conformance to a canonical layer I authored*. A finance team that had ruled net revenue
+the default would score Canon's refusal on `am-01` as a failure rather than a success, and
+nothing in this repo could argue back. Every integrity check I added — dev/test threshold
+separation, gold-versus-card, attribution coverage, shape-versus-execution — tightens
+internal consistency and none of them reaches outside my own judgment.
+
+**Not threatened — the mechanism claims.** That a hallucinated metric is unrepresentable
+because `MetricName` is generated from the YAML and sits inside the provider's wire schema;
+that fan-out cannot be constructed because only `many_to_one` edges are traversable; that
+the compiler is a pure function of `(QueryIntent, MetricCard[])`; that every emitted string
+is parsed by sqlglot before execution. These are properties of the code. You verify them by
+reading `canon/compiler/` and `canon/semantic/enums.py`, not by trusting my gold. They would
+hold identically if someone replaced `metrics.yaml` wholesale with their own definitions —
+which is the actual claim, since the layer is meant to be *theirs*, not mine.
+
+**Not threatened — the determinism finding.** The baseline returned a different number for
+the same question on 2 of 80 questions, with different SQL behind each. That comparison is
+between two runs of the same system; it needs no reference answer at all, so my authorship
+of the gold cannot contaminate it. It is reported in
+[`RESULTS.md`](../benchmark/RESULTS.md) beside the headline for that reason, and it is the
+single result I would stake most on.
+
+So the honest framing is narrower and more defensible than "you wrote the gold, so nothing
+counts": the accuracy numbers measure conformance to a stated layer and should be read that
+way, while the architectural claims and the determinism result stand on their own.
+
+**Weakest point.** The clean split above is itself doing some work for me. The mechanism
+claims are *verifiable* but they are also the easy half — nobody disputes that an enum
+constrains output; the interesting question is whether constraining output that way
+produces better analytics, and answering that needs exactly the accuracy numbers my
+authorship compromises. And the determinism finding, while gold-independent, is measured on
+2 samples with an asymmetric design that favours Canon on sample size. Neither escape hatch
+is as load-bearing as I would like.

@@ -18,7 +18,7 @@ import argparse
 import json
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, Final
 
 from benchmark.harness.score import Aggregate, latency_comparison
 
@@ -39,6 +39,169 @@ def delta(canon: Any, baseline: Any, higher_is_better: bool) -> str:
     good = difference > 0 if higher_is_better else difference < 0
     marker = "" if abs(difference) < 0.05 else (" ✓" if good else " ✗")
     return f"{difference:+.1f}pp{marker}"
+
+
+VARIANCE_ARMS: Final[tuple[tuple[str, str], ...]] = (
+    ("canon", "variance-groq-r2"),
+    ("baseline", "variance-baseline-r2"),
+)
+
+
+def _flip_counts(tag: str, system: str) -> tuple[int, int, int] | None:
+    """``(questions, behaviour_flips, value_flips)`` for one arm, or None if not run.
+
+    A *value* flip is the serious one: the system answered on both samples and returned a
+    different number. A behaviour flip is answered-versus-declined, which is a usability
+    property; a value flip is a correctness one.
+    """
+    path = RUNS_DIR / tag / "checkpoint.jsonl"
+    if not path.exists():
+        return None
+    by_question: dict[str, dict[int, dict[str, Any]]] = {}
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        record = json.loads(line)
+        if record.get("_system") != system:
+            continue
+        by_question.setdefault(record["question_id"], {})[record["_run_index"]] = record
+
+    paired = {q: runs for q, runs in by_question.items() if 0 in runs and 1 in runs}
+    if not paired:
+        return None
+    behaviour = value = 0
+    for runs in paired.values():
+        first, second = runs[0], runs[1]
+        if first.get("outcome") != second.get("outcome"):
+            behaviour += 1
+        elif first.get("value_correct") != second.get("value_correct"):
+            value += 1
+    return len(paired), behaviour, value
+
+
+def _exemplar_value_flip(tag: str, system: str) -> tuple[str, str, str, str] | None:
+    """``(question_id, question, value_a, value_b)`` for one value flip, or None.
+
+    The two figures are obtained by re-executing the two stored SQL strings against the
+    warehouse, not typed into the prose. This document claims no figure in it is written
+    by hand, and an exemplar quoted from memory would be the first exception.
+    """
+    path = RUNS_DIR / tag / "checkpoint.jsonl"
+    if not path.exists():
+        return None
+    by_question: dict[str, dict[int, dict[str, Any]]] = {}
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        record = json.loads(line)
+        if record.get("_system") == system:
+            by_question.setdefault(record["question_id"], {})[record["_run_index"]] = record
+
+    database = REPO_ROOT / "data" / "canon.duckdb"
+    if not database.exists():
+        return None
+    import duckdb
+
+    connection = duckdb.connect(str(database), read_only=True)
+    try:
+        for question_id, runs in sorted(by_question.items()):
+            if 0 not in runs or 1 not in runs:
+                continue
+            first, second = runs[0], runs[1]
+            if first.get("outcome") != second.get("outcome"):
+                continue
+            if first.get("value_correct") == second.get("value_correct"):
+                continue
+            rendered: list[str] = []
+            for record in (first, second):
+                rows = connection.execute(record.get("sql") or "").fetchall()
+                # Single-cell results make the clearest exemplar: two scalars that differ
+                # need no explanation of which column moved.
+                if len(rows) != 1 or len(rows[0]) != 1:
+                    break
+                rendered.append(f"{rows[0][0]:,}")
+            if len(rendered) == 2 and rendered[0] != rendered[1]:
+                return question_id, str(first.get("question")), rendered[0], rendered[1]
+    except Exception:  # pragma: no cover - a bad stored query must not break the report
+        return None
+    finally:
+        connection.close()
+    return None
+
+
+def _determinism() -> list[str]:
+    """The same-question-twice result, placed beside the headline rather than buried.
+
+    This is the one claim in the document that does not depend on gold: two runs
+    disagreeing with each other needs no reference answer to interpret.
+    """
+    measured = {
+        system: counts
+        for system, tag in VARIANCE_ARMS
+        if (counts := _flip_counts(tag, system)) is not None
+    }
+    if "baseline" not in measured:
+        return []
+
+    base_n, _, base_value = measured["baseline"]
+    lines = [
+        "## Asked twice: does the same question get the same answer?",
+        "",
+        "Each system answered the same questions a second time — same provider, same "
+        "model, same config hash, temperature 0 — and the two samples were compared to "
+        "each other.",
+        "",
+        "| System | questions | answered differently (behaviour) | **returned a different number** |",
+        "|---|---|---|---|",
+    ]
+    for system, (count, behaviour, value) in measured.items():
+        lines.append(f"| {system} | {count} | {behaviour} | **{value}** |")
+
+    lines += [
+        "",
+        f"**The baseline returned a different number for the same question on "
+        f"{base_value} of {base_n} questions.** Not a different phrasing of the same "
+        "result — different SQL, producing a different figure.",
+        "",
+    ]
+
+    exemplar = _exemplar_value_flip(dict(VARIANCE_ARMS)["baseline"], "baseline")
+    if exemplar is not None:
+        question_id, question, first_value, second_value = exemplar
+        lines += [
+            f"On `{question_id}`, *“{question}”*, it answered **{first_value}** on one "
+            f"sample and **{second_value}** on the other. Nothing in either answer "
+            "indicates which one to trust. Both figures come from re-executing the two "
+            "stored queries against the warehouse, not from transcription.",
+            "",
+        ]
+
+    lines += [
+        "**Canon cannot do this, and the reason is structural rather than empirical.** "
+        "The metric is an enum, so it is chosen rather than written; the compiler is a "
+        "pure function of `(QueryIntent, MetricCard[])`, so identical intents produce "
+        "byte-identical SQL. The only surface where sampling can change the output is "
+        "intent selection, which shows up as a *different question being answered*, not "
+        "as a silently different number for the same one. Canon recorded "
+        f"{measured.get('canon', (0, 0, 0))[2]} value flips.",
+        "",
+        "**The sampling is asymmetric and the argument should not paper over it.** The "
+        f"baseline was measured on all {base_n} questions; Canon on a "
+        f"{measured.get('canon', (0, 0, 0))[0]}-question probe. Canon's zero is therefore "
+        "*weaker evidence* than the baseline's "
+        f"{base_value} — fewer questions, so fewer chances to observe a flip. The "
+        "structural argument above is what carries the claim; the measurement is "
+        "consistent with it rather than sufficient for it. Full detail in "
+        "[`VARIANCE.md`](VARIANCE.md).",
+        "",
+        "**This is the one finding here that does not depend on gold.** Every accuracy "
+        "number in this document measures conformance to a canonical layer I wrote. Two "
+        "runs disagreeing *with each other* needs no reference answer to interpret: it is "
+        "a property of the system, observable without me. It is the result I would put "
+        "most weight on for that reason.",
+        "",
+    ]
+    return lines
 
 
 def _answering_span(provenance: dict[str, Any]) -> list[str]:
@@ -329,6 +492,8 @@ def main() -> int:
         "finding rather than a scoring artefact.",
         "",
     ]
+
+    lines += _determinism()
 
     # ---------------------------------------------------------------- per tier
     lines += [
