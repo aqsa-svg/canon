@@ -68,17 +68,30 @@ def _bridge_secrets_to_environment() -> None:
 _bridge_secrets_to_environment()
 
 
-@st.cache_resource
-def _layer():  # noqa: ANN202 - streamlit cache wrapper
+# NOT @st.cache_resource, deliberately. See _pipeline below.
+def _layer():  # noqa: ANN202 - matches the loader's own return type
     return load_semantic_layer()
 
 
-@st.cache_resource
 def _pipeline(provider: str) -> CanonPipeline:
+    """Built per rerun rather than cached, which is not an oversight.
+
+    ``st.cache_resource`` survives Streamlit's reloading of local modules; the objects
+    inside it do not stay compatible with it. The pipeline holds a ``SemanticLayer`` made
+    of ``MetricCard`` instances, and when the watcher reloads ``canon.semantic.cards`` it
+    creates a *new* ``MetricCard`` class. ``load_semantic_layer``'s own ``lru_cache``
+    resets with that reload, so fresh code uses the new class while the cached pipeline
+    still holds instances of the old one -- and ``QueryPlan(metric=...)`` then fails
+    validation against a class that is no longer the same object. That surfaced on
+    Streamlit Cloud as a redacted ``pydantic_core.ValidationError`` from
+    ``validate_intent``, and it cannot reproduce in a test that builds everything fresh.
+
+    The cost of rebuilding is a cached YAML parse and a read-only DuckDB connection --
+    milliseconds. The cost of caching it was a demo that broke after a reboot.
+    """
     return CanonPipeline(db_path=DB_PATH, layer=_layer(), client=LlmClient(provider=provider))
 
 
-@st.cache_resource
 def _replay_pipeline(provider: str) -> CanonPipeline:
     """Cache-only pipeline: raises ``CacheMiss`` rather than ever reaching the network.
 

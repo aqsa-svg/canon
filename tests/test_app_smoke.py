@@ -26,6 +26,22 @@ TIMEOUT_SECONDS = 120
 APP_PATH = str(Path(__file__).resolve().parent.parent / "app.py")
 
 
+def _decorators_of(function_name: str) -> str:
+    """The decorator lines attached to a top-level function in app.py.
+
+    Parsed rather than matched on the preceding line: the first version of this check
+    read the line above the def, and tripped on a comment that merely *mentioned*
+    @st.cache_resource while explaining why it was removed.
+    """
+    import ast
+
+    tree = ast.parse(Path(APP_PATH).read_text(encoding="utf-8"))
+    for node in tree.body:
+        if isinstance(node, ast.FunctionDef) and node.name == function_name:
+            return " ".join(ast.unparse(d) for d in node.decorator_list)
+    raise AssertionError(f"{function_name} not found in app.py")
+
+
 def _run() -> AppTest:
     app = AppTest.from_file(APP_PATH, default_timeout=TIMEOUT_SECONDS)
     app.run()
@@ -334,3 +350,34 @@ class TestPublicExposure:
         assert "fault in Canon" in errors, "it must not blame the provider"
         captions = " ".join(caption.value for caption in app.caption)
         assert "validation error for QueryPlan" in captions, "the real cause must show"
+
+    def test_pipelines_are_not_cached_across_streamlit_reruns(self) -> None:
+        """``st.cache_resource`` must not hold anything containing pydantic models.
+
+        This broke the deployed demo. ``st.cache_resource`` survives Streamlit's
+        reloading of local modules, but its contents do not stay compatible with it: the
+        watcher reloads ``canon.semantic.cards``, creating a new ``MetricCard`` class,
+        while the cached pipeline still holds instances of the old one. The next
+        ``QueryPlan(metric=...)`` then fails validation against a class that is no longer
+        the same object, which surfaced on Streamlit Cloud as a redacted
+        ``pydantic_core.ValidationError`` from ``validate_intent``.
+
+        Verified directly: reloading ``canon.semantic.cards`` and re-validating a stale
+        layer raises "2 validation errors for QueryPlan", the first on ``metric``.
+
+        Checked against the source rather than by reloading modules here, because a
+        reload inside the suite would hand every later test a different class object than
+        the one it imported. The cost of the fix is a cached YAML parse and a read-only
+        DuckDB connection per rerun; the cost of the bug was a demo that broke on reboot.
+        """
+        for name in ("_layer", "_pipeline", "_replay_pipeline"):
+            assert "cache_resource" not in _decorators_of(name), (
+                f"{name} must not be cached across reruns -- it carries pydantic models "
+                "whose classes Streamlit can reload underneath the cache"
+            )
+
+    def test_the_warehouse_builder_stays_cached(self) -> None:
+        """The counterpart: it returns a bool and must not re-download per rerun."""
+        assert "cache_resource" in _decorators_of("_ensure_warehouse"), (
+            "the warehouse build must stay cached"
+        )
