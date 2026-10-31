@@ -167,9 +167,26 @@ def _arm_section(tag: str, system: str, totals: list[tuple[str, int, int]]) -> l
         lines += [
             "",
             "A flip at temperature 0 is not a contradiction: the provider does not "
-            "guarantee determinism, and a question whose metric scores sit near the "
-            "policy margin can land either side of it on different samples. Each one "
-            "above is a question whose published result is luck-dependent.",
+            "guarantee determinism. Each one above is a question whose published result "
+            "is luck-dependent.",
+            "",
+            # The mechanism differs by arm and must not be described generically: the
+            # baseline has no refusal policy, so attributing its flips to a policy margin
+            # would invent a component it does not have.
+            (
+                "**The mechanism here is the refusal policy.** A question whose metric "
+                "scores land near `metric_score_margin` can fall either side of it across "
+                "samples, which is why a flip shows up as answered-versus-asked rather "
+                "than as a different number."
+                if system == "canon"
+                else "**The mechanism here is free-form generation, not a refusal "
+                "policy** — the baseline has none, only its own option to decline. Its "
+                "flips therefore come in two kinds, and the second is the more serious: "
+                "a *behaviour* flip, where it declines on one sample and answers on the "
+                "other, and a *value* flip, where it answers both times and computes a "
+                "different number. A value flip means the SQL itself changed between "
+                "identical requests."
+            ),
             "",
             "**What each flip costs the published figures.** The rate a flip moves depends "
             "on what the question was supposed to do, and the denominators are the full "
