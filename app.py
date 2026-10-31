@@ -295,6 +295,21 @@ if go:
                     "it live, which spends free-tier tokens."
                 )
                 st.stop()
+            except Exception as error:
+                # The live path below already handles its failures; this one did not, so
+                # anything other than a CacheMiss escaped to Streamlit's generic error
+                # page, which redacts the message on Cloud and shows a traceback. The
+                # detail is surfaced here because a replay failing is a bug in this
+                # repository -- no provider is involved -- and a redacted bug is one
+                # nobody can report usefully.
+                st.error(
+                    f"**The recorded run for `{recorded_id}` could not be replayed.** "
+                    "No provider was called, so this is a fault in Canon rather than a "
+                    "quota or network problem."
+                )
+                st.caption(f"{type(error).__name__}: {str(error)[:800]}")
+                _examples_reminder()
+                st.stop()
     else:
         remaining, blocked = _live_calls_left(provider_name)
         if blocked == "provider":

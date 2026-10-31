@@ -305,3 +305,32 @@ class TestPublicExposure:
         hint = " ".join(caption.value for caption in app.sidebar.caption)
         assert "Secrets" in hint, "must name the Streamlit Cloud path"
         assert ".env" in hint, "must still name the local path"
+
+    def test_a_broken_replay_is_reported_not_redacted(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The replay path caught only CacheMiss, so everything else escaped.
+
+        On Streamlit Cloud an escaped exception renders as a generic page with the
+        message redacted and a traceback, which is the least useful possible output for
+        a fault that is entirely inside this repository -- no provider is involved in a
+        replay.
+        """
+        from canon.agent.pipeline import CanonPipeline
+
+        def _boom(self: CanonPipeline, question: str, context: object = None) -> None:
+            raise ValueError("1 validation error for QueryPlan")
+
+        monkeypatch.setattr(CanonPipeline, "answer", _boom)
+
+        app = AppTest.from_file(APP_PATH, default_timeout=TIMEOUT_SECONDS)
+        app.run()
+        app.button[0].click().run()
+        next(button for button in app.button if button.label == "Ask").click().run()
+
+        assert not app.exception, "a replay fault must not surface as a stack trace"
+        errors = " ".join(error.value for error in app.error)
+        assert "could not be replayed" in errors, errors[:300]
+        assert "fault in Canon" in errors, "it must not blame the provider"
+        captions = " ".join(caption.value for caption in app.caption)
+        assert "validation error for QueryPlan" in captions, "the real cause must show"
