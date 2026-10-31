@@ -834,7 +834,7 @@ def main() -> int:
         "paired_discrimination": {
             system: paired_discrimination(scores) for system, scores in all_scores.items()
         },
-        "attribution_instrument": gold_collision_report(gold),
+        "attribution_instrument": gold_collision_report(gold, subset),
         "confident_wrong_curve": {
             system: confident_wrong_curve(scores) for system, scores in all_scores.items()
         },

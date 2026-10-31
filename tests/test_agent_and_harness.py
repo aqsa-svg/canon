@@ -21,6 +21,7 @@ from benchmark.harness.dataset import Behavior, QuestionSet, Tier, load_question
 from benchmark.harness.run import (
     Provenance,
     _load_checkpoint,
+    _load_gold,
     _prior_provenance,
     provider_conflict,
 )
@@ -1247,3 +1248,34 @@ class TestProvenanceIsNotRestamped:
         assert one.answering_span is None
         many = one.model_copy(update={"answering_sessions": ("2026-09-04@a", "2026-10-02@b")})
         assert many.answering_span == ("2026-09-04@a", "2026-10-02@b")
+
+
+class TestCollisionsAreClassified:
+    """Two collisions are not equally dangerous, and the report must say which is which.
+
+    Found by asking whether t1-01 and t3-04 sharing 7,341,182.41 was a coincidence. It
+    was not: they are paraphrases of one metric with byte-identical gold SQL. But the
+    same value group also contains t3-03, which asks for a *different* metric and lands
+    there because the 2018-01-01 restatement makes reported_revenue and net_revenue
+    agree inside 2018. Only that second kind destroys attribution.
+    """
+
+    def test_the_real_set_has_exactly_one_cross_metric_collision(self) -> None:
+        report = gold_collision_report(_load_gold(), load_questions())
+        cross = [g for g in report["collision_groups"] if g["cross_metric"]]
+        assert len(cross) == 1, [g["questions"] for g in cross]
+        assert set(cross[0]["questions"]) == {"t1-01", "t3-03", "t3-04", "t3-06"}
+        assert cross[0]["metrics"] == ["net_revenue", "reported_revenue"]
+
+    def test_same_metric_paraphrases_are_not_flagged_cross_metric(self) -> None:
+        """They cost coverage and nothing else: the definition was right either way."""
+        report = gold_collision_report(_load_gold(), load_questions())
+        same = {tuple(g["questions"]) for g in report["collision_groups"] if not g["cross_metric"]}
+        assert ("t3-01", "t3-05") in same
+        assert ("t1-11", "t3-07") in same
+
+    def test_the_annotation_is_optional(self) -> None:
+        """Called without questions it still works, for callers that have no QuestionSet."""
+        report = gold_collision_report(_load_gold())
+        assert "shared_value_groups" in report
+        assert "collision_groups" not in report

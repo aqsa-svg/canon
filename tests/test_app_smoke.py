@@ -12,6 +12,7 @@ would need a live call and free-tier quota, so those are covered by the harness 
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
@@ -83,11 +84,30 @@ def test_the_four_examples_are_offered() -> None:
     assert "gate" in joined
 
 
-def test_the_sidebar_shows_the_free_tier_budget() -> None:
-    """On a free tier, remaining quota is information the viewer needs."""
+def test_the_sidebar_shows_the_demo_budget_not_the_providers() -> None:
+    """The headline number must be the one the visitor can actually spend.
+
+    It used to show the provider's 200,000/day allowance, which a visitor cannot touch:
+    the demo caps itself at a fraction of it. A true number implying a false thing, the
+    same defect as a latency mean that averages in cache hits.
+    """
+    import demo_config
+
     app = _run()
-    labels = [metric.label for metric in app.sidebar.metric]
-    assert any("free tokens" in label.lower() for label in labels), labels
+    labels = [metric.label.lower() for metric in app.sidebar.metric]
+    assert any("demo tokens" in label for label in labels), labels
+    assert not any(label == "free tokens left today" for label in labels), labels
+
+    values = [metric.value for metric in app.sidebar.metric]
+    ceiling = demo_config.DEMO_DAILY_TOKEN_CEILING
+    shown = [int(v.replace(",", "")) for v in values if v.replace(",", "").isdigit()]
+    assert shown and all(v <= ceiling for v in shown), (
+        f"the sidebar must never show more than the demo ceiling {ceiling:,}: {shown}"
+    )
+
+    # The provider allowance may still be mentioned, but only as context.
+    captions = " ".join(caption.value for caption in app.sidebar.caption).lower()
+    assert "not available to this page" in captions
 
 
 def test_clicking_an_example_only_changes_the_question() -> None:
@@ -292,8 +312,13 @@ class TestPublicExposure:
         provider at all, so a missing key is a warning about one feature rather than a
         failure of the page.
         """
-        for name in ("GROQ_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY", "ANTHROPIC_API_KEY"):
+        import demo_config
+
+        for name in demo_config.PROVIDER_KEY_NAMES:
             monkeypatch.delenv(name, raising=False)
+        # Also stop the app re-loading .env on this machine, which would undo the above
+        # and make the no-key state untestable for anyone who has a key configured.
+        monkeypatch.setattr(demo_config, "install_provider_keys", lambda: ())
 
         app = AppTest.from_file(APP_PATH, default_timeout=TIMEOUT_SECONDS)
         app.run()
@@ -315,7 +340,10 @@ class TestPublicExposure:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """The original message told a Cloud user to create a file they cannot create."""
+        import demo_config
+
         monkeypatch.delenv("GROQ_API_KEY", raising=False)
+        monkeypatch.setattr(demo_config, "install_provider_keys", lambda: ())
         app = AppTest.from_file(APP_PATH, default_timeout=TIMEOUT_SECONDS)
         app.run()
         hint = " ".join(caption.value for caption in app.sidebar.caption)
@@ -381,3 +409,110 @@ class TestPublicExposure:
         assert "cache_resource" in _decorators_of("_ensure_warehouse"), (
             "the warehouse build must stay cached"
         )
+
+
+class TestKeyResolution:
+    """Both ways a key can reach the app, each exercised rather than assumed.
+
+    Streamlit Cloud can only supply a key through ``st.secrets``; a stranger running
+    this locally can only supply one through ``.env``. The deployed demo had already
+    shown that getting this wrong produces a confusing message rather than a crash, so
+    both paths are tested and so is their precedence.
+    """
+
+    def test_a_key_in_the_environment_resolves(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        import demo_config
+
+        monkeypatch.setattr(demo_config, "_secret", lambda name: None)
+        monkeypatch.setenv("GROQ_API_KEY", "gsk_from_environment")
+        assert demo_config.resolve_provider_key("GROQ_API_KEY") == "gsk_from_environment"
+
+    def test_a_key_in_streamlit_secrets_resolves(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The Cloud path: no .env exists in the container."""
+        import demo_config
+
+        monkeypatch.delenv("GROQ_API_KEY", raising=False)
+        monkeypatch.setattr(demo_config, "_secret", lambda name: "gsk_from_secrets")
+        assert demo_config.resolve_provider_key("GROQ_API_KEY") == "gsk_from_secrets"
+
+    def test_secrets_win_when_both_are_present(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Documented precedence: secrets.toml is the more deliberate of the two."""
+        import demo_config
+
+        monkeypatch.setenv("GROQ_API_KEY", "gsk_from_environment")
+        monkeypatch.setattr(demo_config, "_secret", lambda name: "gsk_from_secrets")
+        assert demo_config.resolve_provider_key("GROQ_API_KEY") == "gsk_from_secrets"
+
+    def test_no_key_anywhere_resolves_to_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        import demo_config
+
+        monkeypatch.setattr(demo_config, "_secret", lambda name: None)
+        monkeypatch.setenv("GROQ_API_KEY", "   ")  # whitespace is not a key
+        assert demo_config.resolve_provider_key("GROQ_API_KEY") is None
+
+    def test_resolution_works_without_streamlit_installed(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``_secret`` must degrade to None, not raise, outside a Streamlit runtime.
+
+        demo_config is imported by the harness and the scripts, neither of which has a
+        Streamlit runtime, so an unguarded ``st.secrets`` access would break them.
+        """
+        import builtins
+
+        import demo_config
+
+        real_import = builtins.__import__
+
+        def _no_streamlit(name: str, *args: object, **kwargs: object) -> object:
+            if name == "streamlit" or name.startswith("streamlit."):
+                raise ImportError("streamlit is not installed")
+            return real_import(name, *args, **kwargs)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(builtins, "__import__", _no_streamlit)
+        assert demo_config._secret("GROQ_API_KEY") is None
+
+    def test_install_publishes_resolved_keys_to_the_environment(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The provider layer reads os.environ, so resolution has to land there."""
+        import demo_config
+
+        for name in demo_config.PROVIDER_KEY_NAMES:
+            monkeypatch.delenv(name, raising=False)
+        monkeypatch.setattr(
+            demo_config,
+            "_secret",
+            lambda name: "gsk_cloud" if name == "GROQ_API_KEY" else None,
+        )
+        installed = demo_config.install_provider_keys()
+        assert installed == ("GROQ_API_KEY",)
+        assert os.environ["GROQ_API_KEY"] == "gsk_cloud"
+
+
+def test_the_quoted_benchmark_figures_match_results_md() -> None:
+    """The page carries numbers it cannot read at runtime, so they can drift.
+
+    ``benchmark/runs/`` is gitignored, so there is no report.json in a Streamlit Cloud
+    container and the page has to hardcode the figures it cites. That is a standing
+    drift risk against the number rule in CLAUDE.md, and this is the guard: every figure
+    quoted on the page must still appear in the document it claims to come from.
+    """
+    import demo_config
+
+    results = (demo_config.REPO_ROOT / "benchmark" / "RESULTS.md").read_text(encoding="utf-8")
+    under_refusal = next(
+        line for line in results.splitlines() if "under-refusal rate" in line.lower()
+    )
+    assert demo_config.UNDER_REFUSAL_CANON in under_refusal, under_refusal
+    assert demo_config.UNDER_REFUSAL_BASELINE in under_refusal, under_refusal
+
+    question_count = next(
+        line for line in results.splitlines() if line.startswith("| question_count")
+    )
+    assert str(demo_config.BENCHMARK_QUESTIONS) in question_count, question_count
+
+    # Matched on the prose sentence, not the table header, which also contains the
+    # phrase "returned a different number" and carries no figures.
+    determinism = next(line for line in results.splitlines() if "for the same question on" in line)
+    assert demo_config.DETERMINISM_FLIPS in determinism, determinism

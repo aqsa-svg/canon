@@ -22,8 +22,8 @@ Generated from `benchmark/runs/sweep-groq-r1/report.json` by `scripts/write_resu
 | cache_used | `True` |
 | complete | `True` |
 | policy_thresholds | `metric_score_margin=0.15, minimum_top_score=0.45` |
-| scored_at | `2026-10-23T09:39:05.424027+00:00` |
-| scoring_commit | `1b74a90` |
+| scored_at | `2026-10-31T16:15:21.171316+00:00` |
+| scoring_commit | `8671c55` |
 
 **Threshold provenance.** UNVALIDATED: chosen a priori from the design and never fitted to data. No eval-set question was used, so refusal accuracy is not inflated by threshold leakage -- but the values have also never been checked against real model output. Run scripts/tune_thresholds.py against benchmark/dev/questions.yaml (14 held-out questions) to validate them.
 
@@ -155,6 +155,16 @@ When a system returns a wrong number, the harness checks whether that number is 
 | shared between questions | 8 |
 | below magnitude threshold (1000.0) | 20 |
 | **can support an attribution** | 27 (49.1%) |
+
+**Not every collision is equally damaging**, so they are classified rather than counted together:
+
+| Questions | Metrics | Kind |
+|---|---|---|
+| `t1-01`, `t3-03`, `t3-04`, `t3-06` | `net_revenue`, `reported_revenue` | **different metrics, equal value** |
+| `t1-11`, `t3-07` | `unique_customers` | same metric, reworded |
+| `t3-01`, `t3-05` | `gross_revenue` | same metric, reworded |
+
+A *same metric, reworded* group costs coverage and nothing else: the questions are deliberate paraphrases with identical gold SQL, so matching that value tells you the definition was right and only the phrasing differed. A *different metrics, equal value* group is the one that defeats attribution, because two definitions produce the same number and a wrong answer landing there cannot be traced to either. Here that happens once: `reported_revenue` and `net_revenue` agree inside 2018, since the 2018-01-01 restatement is what made them differ in the first place.
 
 - baseline: 7 attributable, 2 unattributable
 - canon: 4 attributable, 4 unattributable

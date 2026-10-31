@@ -284,7 +284,7 @@ Three deliberate traps make the benchmark measure something real:
 
 ## Live demo
 
-**▶ [TODO: paste the Streamlit Community Cloud URL here after deploying]**
+**▶ [hjmh5h86svtjm6wv2ryxrj.streamlit.app](https://hjmh5h86svtjm6wv2ryxrj.streamlit.app/)**
 
 Runs on a free-tier quota and is rate-limited, so it may decline a question when the
 day's budget is spent — that constraint is the project's, not a fault, and the page says

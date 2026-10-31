@@ -596,6 +596,38 @@ def main() -> int:
             f"({pct(attribution.get('attribution_coverage'))}) |",
             "",
         ]
+
+        groups = attribution.get("collision_groups") or []
+        if groups:
+            lines += [
+                "**Not every collision is equally damaging**, so they are classified "
+                "rather than counted together:",
+                "",
+                "| Questions | Metrics | Kind |",
+                "|---|---|---|",
+            ]
+            for group in groups:
+                questions = ", ".join(f"`{q}`" for q in group["questions"])
+                metrics = ", ".join(f"`{m}`" for m in group["metrics"])
+                kind = (
+                    "**different metrics, equal value**"
+                    if group["cross_metric"]
+                    else "same metric, reworded"
+                )
+                lines.append(f"| {questions} | {metrics} | {kind} |")
+            lines += [
+                "",
+                "A *same metric, reworded* group costs coverage and nothing else: the "
+                "questions are deliberate paraphrases with identical gold SQL, so "
+                "matching that value tells you the definition was right and only the "
+                "phrasing differed. A *different metrics, equal value* group is the one "
+                "that defeats attribution, because two definitions produce the same "
+                "number and a wrong answer landing there cannot be traced to either. "
+                "Here that happens once: `reported_revenue` and `net_revenue` agree "
+                "inside 2018, since the 2018-01-01 restatement is what made them differ "
+                "in the first place.",
+                "",
+            ]
         for name, item in aggregates.items():
             lines.append(
                 f"- {name}: {item.get('attributable_wrong_count', 0)} attributable, "

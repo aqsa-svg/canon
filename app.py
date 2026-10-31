@@ -11,11 +11,8 @@ Run:  uv run streamlit run app.py
 
 from __future__ import annotations
 
-import os
-
 import pandas as pd
 import streamlit as st
-from streamlit.errors import StreamlitSecretNotFoundError
 
 from canon.agent.llm import CacheMiss, CallContext, LlmClient, LlmError
 from canon.agent.pipeline import CanonPipeline, PipelineResult
@@ -28,44 +25,26 @@ from canon.agent.providers import (
 )
 from canon.semantic.loader import load_semantic_layer, semantic_layer_hash
 from demo_config import (
+    BENCHMARK_QUESTIONS,
     BY_QUESTION,
     DB_PATH,
     DEMO_CACHE,
     DEMO_DAILY_TOKEN_CEILING,
     DEMO_LEDGER_KEY,
+    DETERMINISM_FLIPS,
     EXAMPLES,
     RECORDED_RUN,
+    RESULTS_URL,
     SESSION_LIVE_CALL_CAP,
+    UNDER_REFUSAL_BASELINE,
+    UNDER_REFUSAL_CANON,
+    install_provider_keys,
 )
 
 st.set_page_config(page_title="Canon", layout="wide", page_icon="📐")
 
 
-def _bridge_secrets_to_environment() -> None:
-    """Copy provider keys from Streamlit's secrets store into the environment.
-
-    The provider layer reads ``os.environ`` because it has to work from the harness and
-    the scripts, where Streamlit does not exist. On Streamlit Cloud there is no ``.env``
-    to load -- keys are entered in *Settings → Secrets* -- so without this bridge a
-    correctly-configured deployment still reports no API key.
-
-    Streamlit does export top-level secrets as environment variables itself, but relying
-    on that leaves the deployment working by a side effect rather than by intent, and the
-    failure mode is a confusing message rather than a crash. Existing environment values
-    win, so a local ``.env`` is never overridden by a stale secret.
-    """
-    for name in ("GROQ_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY", "ANTHROPIC_API_KEY"):
-        if os.environ.get(name):
-            continue
-        try:
-            value = st.secrets[name]
-        except (KeyError, FileNotFoundError, StreamlitSecretNotFoundError):
-            continue
-        if isinstance(value, str) and value.strip():
-            os.environ[name] = value.strip()
-
-
-_bridge_secrets_to_environment()
+install_provider_keys()
 
 
 # NOT @st.cache_resource, deliberately. See _pipeline below.
@@ -186,14 +165,31 @@ with st.sidebar:
             "in `.env.example`, which is tracked by git."
         )
 
-    requests_left, tokens_left = client.remaining_today()
+    # The PROVIDER's allowance used to be shown here. It is a true number that implies
+    # something false: a visitor cannot spend it, because this demo caps itself far
+    # below it. Same class of error as a latency mean that averages in cache hits.
+    demo_left = max(DEMO_DAILY_TOKEN_CEILING - _demo_spent_today(), 0)
     st.metric(
-        "free tokens left today",
-        f"{tokens_left:,}" if tokens_left is not None else "no daily cap",
-        help="Read from the on-disk quota ledger, which persists across days.",
+        "demo tokens left today",
+        f"{demo_left:,}",
+        help=(
+            f"This demo's own ceiling is {DEMO_DAILY_TOKEN_CEILING:,} tokens a day, "
+            "metered separately from the benchmark so a sweep cannot disable the page "
+            "and the page cannot exhaust a sweep. Resets 00:00 UTC."
+        ),
     )
-    if requests_left is not None:
-        st.caption(f"{requests_left} requests left today")
+    session_left, _ = _live_calls_left(provider_name)
+    st.caption(
+        f"{session_left} of {SESSION_LIVE_CALL_CAP} live questions left this session. "
+        "The four examples are unlimited — they replay recorded runs."
+    )
+    provider_requests, provider_tokens = client.remaining_today()
+    if provider_tokens is not None:
+        st.caption(
+            f"Provider allowance behind it: {provider_tokens:,} tokens"
+            + (f", {provider_requests} requests" if provider_requests is not None else "")
+            + " — shared with the benchmark, not available to this page."
+        )
 
     st.divider()
     st.caption(
@@ -493,6 +489,18 @@ with top_right:
     if spec is not None and len(frame) > 1 and spec.x in frame.columns:
         plotted = frame.set_index(spec.x)[spec.y]
         (st.line_chart if spec.kind.value == "line" else st.bar_chart)(plotted)
+
+st.divider()
+
+# The demo is the hook; the benchmark is the argument. Without this there was no path
+# from one to the other, and the page's strongest claim lived only in the repository.
+st.markdown(
+    f"**This behaviour is measured, not asserted.** Across {BENCHMARK_QUESTIONS} questions, "
+    f"Canon answered none of the ambiguous ones with a guess — **{UNDER_REFUSAL_CANON} "
+    f"under-refusal against the baseline's {UNDER_REFUSAL_BASELINE}** — and the baseline "
+    f"returned a *different number for the same question* on {DETERMINISM_FLIPS}. "
+    f"[See the benchmark →]({RESULTS_URL})"
+)
 
 st.divider()
 

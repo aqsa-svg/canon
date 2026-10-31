@@ -583,13 +583,32 @@ def _is_distinctive(rows: tuple[tuple[Any, ...], ...]) -> bool:
     return False
 
 
-def gold_collision_report(gold_values: dict[str, list[list[Any]]]) -> dict[str, Any]:
+def gold_collision_report(
+    gold_values: dict[str, list[list[Any]]],
+    questions: QuestionSet | None = None,
+) -> dict[str, Any]:
     """The instrument's stated error bar.
 
     Measures how much of the gold set can support an attribution at all: how many gold
     values are shared between questions, and how many are too small to be distinctive.
     An instrument with no known false-positive rate should not be quoted, so this is
     computed and reported alongside anything derived from it.
+
+    When ``questions`` is supplied, each collision group is also labelled with the
+    metrics it spans, because the two kinds of collision are not equally dangerous:
+
+    - **Same metric, different wording.** ``t1-01`` ("net revenue in 2018"), ``t3-04``
+      ("revenue excluding shipping") and ``t3-06`` ("merchandise revenue") share one
+      value because they are deliberate paraphrases with byte-identical gold SQL. They
+      cost attribution coverage and nothing else -- matching that value tells you the
+      definition was right and only the phrasing differed.
+    - **Different metrics, equal value.** ``t3-03`` asks for ``reported_revenue`` and
+      lands on the same number, because the 2018-01-01 restatement makes the two
+      definitions agree inside 2018. *That* is the dangerous kind: a wrong answer
+      matching it cannot be attributed to a definition at all, since two definitions
+      produce it.
+
+    Counting them together would overstate how much the instrument knows.
     """
     signatures: dict[str, list[str]] = {}
     for question_id, rows in gold_values.items():
@@ -603,15 +622,34 @@ def gold_collision_report(gold_values: dict[str, list[list[Any]]]) -> dict[str, 
     ]
     ambiguous_ids = {qid for ids in shared.values() for qid in ids}
     usable = [qid for qid in gold_values if qid not in ambiguous_ids and qid not in set(small)]
-    return {
+
+    groups = sorted(sorted(ids) for ids in shared.values())
+    report: dict[str, Any] = {
         "total_gold_values": len(gold_values),
-        "shared_value_groups": sorted(sorted(ids) for ids in shared.values()),
+        "shared_value_groups": groups,
         "questions_with_shared_values": len(ambiguous_ids),
         "questions_below_magnitude_threshold": len(small),
         "questions_supporting_attribution": len(usable),
         "attribution_coverage": (round(len(usable) / len(gold_values), 4) if gold_values else None),
         "magnitude_threshold": MIN_ATTRIBUTION_MAGNITUDE,
     }
+
+    if questions is not None:
+        metric_of = {item.id: item.expected_metric for item in questions.questions}
+        annotated = []
+        for group in groups:
+            metrics = sorted({str(metric_of.get(qid)) for qid in group if metric_of.get(qid)})
+            annotated.append(
+                {
+                    "questions": group,
+                    "metrics": metrics,
+                    "cross_metric": len(metrics) > 1,
+                }
+            )
+        report["collision_groups"] = annotated
+        report["cross_metric_groups"] = sum(1 for item in annotated if item["cross_metric"])
+
+    return report
 
 
 def attribute_wrong_answer(

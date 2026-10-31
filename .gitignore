@@ -9,6 +9,11 @@ __pycache__/
 # secrets
 .env
 
+# streamlit: secrets.toml holds real keys, exactly like .env. Ignored as a directory
+# rather than as one filename, so a config.toml or a future secrets file cannot be
+# committed by accident either.
+.streamlit/
+
 # data: large, downloaded, and reproducible via scripts/load_data.py
 data/raw/
 data/*.duckdb
