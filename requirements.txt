@@ -1,0 +1,30 @@
+# Streamlit Community Cloud builds from this file.
+#
+# Pinned exactly, not floored. pyproject.toml declares floors (">=") because the library
+# should tolerate a range; a deployment should not. An unpinned dep means the next upstream
+# release can break the demo with no commit here, and the failure surfaces in someone
+# else's build logs.
+#
+# Verified against a clean checkout -- see the README's deployment section for what that
+# check actually covered.
+
+# core: the semantic layer, the compiler, and the typed boundary
+pydantic==2.13.5
+duckdb==1.5.5
+sqlglot==30.18.0
+pyyaml==6.0.3
+python-dotenv==1.2.3
+
+# the demo surface
+streamlit==1.63.0
+pandas==3.0.5
+
+# providers. groq is the default and the only one the public demo needs a key for, but the
+# sidebar offers the others, so their SDKs ship too rather than letting a visible option
+# raise ImportError when selected.
+groq==1.7.0
+google-genai==2.22.0
+anthropic==1.3.0
+
+# offline token counting for the quota ledger and the dry run
+tiktoken==0.14.0

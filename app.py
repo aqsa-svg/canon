@@ -11,46 +11,29 @@ Run:  uv run streamlit run app.py
 
 from __future__ import annotations
 
-from pathlib import Path
-
 import pandas as pd
 import streamlit as st
 
-from canon.agent.llm import LlmClient, LlmError
+from canon.agent.llm import CacheMiss, CallContext, LlmClient, LlmError
 from canon.agent.pipeline import CanonPipeline, PipelineResult
-from canon.agent.providers import DEFAULT_PROVIDER, available_providers, is_free_tier
-from canon.semantic.loader import load_semantic_layer, semantic_layer_hash
-
-DB_PATH = Path(__file__).resolve().parent / "data" / "canon.duckdb"
-
-EXAMPLES: tuple[tuple[str, str, str], ...] = (
-    (
-        "Clean answer",
-        "What was net revenue in 2018?",
-        "One metric named outright. Watch the card's default status filter get applied "
-        "without being asked for, and show up as a caveat.",
-    ),
-    (
-        "Ambiguous — it asks",
-        "How much revenue did we make in 2018?",
-        "Three revenue definitions exist and none is the default. A number here would be "
-        "a guess dressed as an answer. This is the moment the project is about.",
-    ),
-    (
-        "Definition changes mid-series",
-        "Show me reported revenue by quarter across 2017 and 2018.",
-        "reported_revenue changes its freight treatment on 2018-01-01 and prior periods "
-        "were never restated. The numbers are right; growth through the boundary is not, "
-        "and the caveat has to say so.",
-    ),
-    (
-        "Verification gate trips",
-        "What was net revenue in October 2018?",
-        "Legal intent, correct SQL, and no rows: all four orders placed that month were "
-        "canceled and carry no line items. The gate returns a flag rather than a figure.",
-    ),
+from canon.agent.providers import (
+    DEFAULT_PROVIDER,
+    QuotaExhausted,
+    QuotaLedger,
+    available_providers,
+    is_free_tier,
 )
-
+from canon.semantic.loader import load_semantic_layer, semantic_layer_hash
+from demo_config import (
+    BY_QUESTION,
+    DB_PATH,
+    DEMO_CACHE,
+    DEMO_DAILY_TOKEN_CEILING,
+    DEMO_LEDGER_KEY,
+    EXAMPLES,
+    RECORDED_RUN,
+    SESSION_LIVE_CALL_CAP,
+)
 
 st.set_page_config(page_title="Canon", layout="wide", page_icon="📐")
 
@@ -63,6 +46,67 @@ def _layer():  # noqa: ANN202 - streamlit cache wrapper
 @st.cache_resource
 def _pipeline(provider: str) -> CanonPipeline:
     return CanonPipeline(db_path=DB_PATH, layer=_layer(), client=LlmClient(provider=provider))
+
+
+@st.cache_resource
+def _replay_pipeline(provider: str) -> CanonPipeline:
+    """Cache-only pipeline: raises ``CacheMiss`` rather than ever reaching the network.
+
+    Enforced by the client, not by this page remembering to check. A demo that *intends*
+    to be free but can still make a call is one bug away from draining the day's quota.
+    """
+    return CanonPipeline(
+        db_path=DB_PATH,
+        layer=_layer(),
+        client=LlmClient(provider=provider, cache_only=True, cache_dir=DEMO_CACHE),
+        decision_log=None,
+    )
+
+
+def _demo_spent_today() -> int:
+    """Tokens this demo has spent today, excluding anything the benchmark spent."""
+    try:
+        return QuotaLedger().usage(DEMO_LEDGER_KEY).tokens
+    except Exception:  # pragma: no cover - a missing ledger must not break the page
+        return 0
+
+
+def _record_demo_spend(tokens: int) -> None:
+    """Meter a live call against the demo's daily share.
+
+    A failure here is not swallowed. ``CLAUDE.md`` forbids silent fallbacks, and this is
+    exactly the case the rule is for: if metering fails quietly the ceiling stops being
+    enforced while still appearing to be, which is worse than a visible warning.
+    """
+    try:
+        QuotaLedger().record(DEMO_LEDGER_KEY, tokens=tokens)
+    except OSError as error:
+        st.warning(
+            f"Could not record this call against the demo's daily budget ({error}). "
+            "The per-session cap still applies, but the daily ceiling is not being "
+            "enforced right now."
+        )
+
+
+def _live_calls_left(provider: str) -> tuple[int, str | None]:
+    """Remaining live calls for this session, and why none are left if so.
+
+    Two independent ceilings, checked in order of severity: the provider's own daily
+    allowance, which nothing can be done about, then the demo's self-imposed share of it,
+    then this session's.
+    """
+    try:
+        _, tokens_left = LlmClient(provider=provider).remaining_today()
+    except Exception:  # pragma: no cover - never block on a metering failure
+        tokens_left = None
+    if tokens_left is not None and tokens_left <= 0:
+        return 0, "provider"
+    if _demo_spent_today() >= DEMO_DAILY_TOKEN_CEILING:
+        return 0, "daily"
+    used = st.session_state.get("live_calls", 0)
+    if used >= SESSION_LIVE_CALL_CAP:
+        return 0, "session"
+    return SESSION_LIVE_CALL_CAP - used, None
 
 
 layer = _layer()
@@ -118,15 +162,15 @@ st.markdown(
 )
 
 if "question" not in st.session_state:
-    st.session_state.question = EXAMPLES[0][1]
+    st.session_state.question = EXAMPLES[0].question
 
-st.markdown("##### Try one")
+st.markdown("##### Try one — these replay recorded runs and cost nothing")
 columns = st.columns(len(EXAMPLES))
-for column, (label, text, why) in zip(columns, EXAMPLES, strict=True):
+for column, example in zip(columns, EXAMPLES, strict=True):
     with column:
-        if st.button(label, use_container_width=True, help=why):
-            st.session_state.question = text
-        st.caption(why)
+        if st.button(example.label, use_container_width=True, help=example.why):
+            st.session_state.question = example.question
+        st.caption(example.why)
 
 question = st.text_input(
     "Ask a business question",
@@ -134,29 +178,169 @@ question = st.text_input(
     label_visibility="collapsed",
 )
 
+
+@st.cache_resource(show_spinner=False)
+def _ensure_warehouse() -> bool:
+    """Build the warehouse if this checkout does not have one.
+
+    ``data/*.duckdb`` is gitignored -- it is 58 MB and reproducible -- so a fresh clone
+    and a Streamlit Cloud container both start without it. The loader pulls public CSVs
+    over plain HTTPS with no credentials, so it can run here; cached so it happens once
+    per container rather than once per page view.
+    """
+    if DB_PATH.exists():
+        return True
+    from scripts.load_data import main as load_data
+
+    load_data()
+    return DB_PATH.exists()
+
+
 if not DB_PATH.exists():
-    st.error(f"{DB_PATH.name} not built. Run `uv run python scripts/load_data.py`.")
-    st.stop()
+    with st.status("First run: building the warehouse from public CSVs…", expanded=True) as status:
+        st.write(
+            "`data/canon.duckdb` is 58 MB and reproducible, so it is not committed. "
+            "Downloading the Olist dataset and loading it — about a minute, once per "
+            "container."
+        )
+        try:
+            built = _ensure_warehouse()
+        except Exception as error:
+            status.update(label="Could not build the warehouse", state="error")
+            st.error(
+                "The dataset could not be downloaded, so there is nothing to query. "
+                "This is a network or upstream-mirror problem rather than a fault in "
+                "Canon. Locally, run `python scripts/load_data.py` and reload."
+            )
+            st.caption(f"{type(error).__name__}: {str(error)[:300]}")
+            st.stop()
+        if not built:
+            status.update(label="Could not build the warehouse", state="error")
+            st.error("The loader finished but no database appeared. Check the logs.")
+            st.stop()
+        status.update(label="Warehouse ready", state="complete")
 
 go = st.button("Ask", type="primary")
 if not go and "last_result" not in st.session_state:
     st.info("Pick an example or type a question, then press **Ask**.")
     st.stop()
 
+
+def _examples_reminder() -> None:
+    """Point back at the four free examples. Used wherever a live call is refused."""
+    st.markdown(
+        "**The four examples above still work and cost nothing** — they replay recorded "
+        f"runs from `{RECORDED_RUN}`. They are also the part worth seeing: a clean "
+        "answer, a refusal, a definition change mid-series, and the verification gate "
+        "catching an empty result."
+    )
+
+
 if go:
-    pipeline = _pipeline(provider_name)
-    with st.spinner("one structured call, then a deterministic compiler…"):
-        try:
-            st.session_state.last_result = pipeline.answer(question)
-        except LlmError as error:
-            st.error(f"Provider error: {error}")
+    recorded_id = BY_QUESTION.get(question.strip())
+
+    if recorded_id is not None:
+        # A known example: replay it. The cache-only client cannot reach the network, so
+        # this path is free by construction rather than by intention.
+        with st.spinner("replaying the recorded run…"):
+            try:
+                st.session_state.last_result = _replay_pipeline(provider_name).answer(
+                    question,
+                    context=CallContext(system="canon", question_id=recorded_id, run_index=0),
+                )
+                st.session_state.last_was_replay = recorded_id
+            except CacheMiss:
+                st.warning(
+                    f"No recorded response for `{recorded_id}` in this checkout, so this "
+                    "example cannot be replayed. Type the question and press Ask to run "
+                    "it live, which spends free-tier tokens."
+                )
+                st.stop()
+    else:
+        remaining, blocked = _live_calls_left(provider_name)
+        if blocked == "provider":
+            st.error(
+                "**The provider's free-tier budget for today is spent.** This is the "
+                "constraint the project runs under rather than a fault: the whole "
+                "benchmark is reproducible for $0, and the price of that is a daily "
+                "ceiling. It resets at 00:00 UTC."
+            )
+            _examples_reminder()
             st.stop()
-        except Exception as error:
-            st.error(f"{type(error).__name__}: {error}")
+        if blocked == "daily":
+            st.error(
+                f"**This demo has spent its daily budget.** It is capped at "
+                f"{DEMO_DAILY_TOKEN_CEILING:,} tokens a day, well under the provider's "
+                "free-tier allowance, so that a busy day here cannot make the benchmark "
+                "unreproducible for whoever reads it next. It resets at 00:00 UTC."
+            )
+            _examples_reminder()
             st.stop()
+        if blocked == "session":
+            st.warning(
+                f"**You have used this session's {SESSION_LIVE_CALL_CAP} live questions.** "
+                "The cap exists because this page runs on a shared free-tier quota that "
+                "any visitor can drain. Reload for a new session, or clone the repo and "
+                "run it against your own key — it costs nothing."
+            )
+            _examples_reminder()
+            st.stop()
+
+        with st.spinner("one structured call, then a deterministic compiler…"):
+            try:
+                answered = _pipeline(provider_name).answer(question)
+                st.session_state.last_result = answered
+                st.session_state.last_was_replay = None
+                st.session_state.live_calls = st.session_state.get("live_calls", 0) + 1
+                _record_demo_spend(answered.usage.total_tokens)
+            except QuotaExhausted:
+                st.error(
+                    "**The provider's free-tier budget for today is spent.** This is the "
+                    "constraint the project runs under rather than a fault: the whole "
+                    "benchmark is reproducible for $0, and the price of that is a daily "
+                    "ceiling. It resets at 00:00 UTC."
+                )
+                _examples_reminder()
+                st.stop()
+            except LlmError as error:
+                st.error(
+                    "**The provider could not answer that just now.** This is usually a "
+                    "rate limit or a transient outage rather than anything about the "
+                    "question; trying again in a minute often works."
+                )
+                st.caption(f"Reported as: {type(error).__name__}: {str(error)[:200]}")
+                _examples_reminder()
+                st.stop()
+            except Exception as error:  # pragma: no cover - last resort, never a traceback
+                st.error(
+                    "**Something went wrong producing that answer.** The error is shown "
+                    "below rather than as a stack trace."
+                )
+                st.caption(f"{type(error).__name__}: {str(error)[:200]}")
+                _examples_reminder()
+                st.stop()
 
 result: PipelineResult = st.session_state.last_result
 answer = result.answer
+
+# The interface must not be capable of implying something the data does not support: a
+# replayed response and a live one look identical downstream, so the difference is stated
+# here rather than left to the visitor to assume.
+_replayed = st.session_state.get("last_was_replay")
+if _replayed is not None:
+    st.caption(
+        f"↻ **Replay of a recorded run** — question `{_replayed}` from the benchmark run "
+        f"`{RECORDED_RUN}`, served from the response cache. No model call was made and no "
+        "tokens were spent. The pipeline below is real: the intent, the compiled SQL and "
+        "the verification all re-ran against the warehouse just now; only the model's "
+        "reply was stored."
+    )
+else:
+    _left, _ = _live_calls_left(provider_name)
+    st.caption(
+        f"● **Live call** — answered just now by `{provider_name}`. "
+        f"{_left} of {SESSION_LIVE_CALL_CAP} live questions left this session."
+    )
 
 if result.error or answer is None:
     st.error(f"Could not produce an answer: {result.error}")

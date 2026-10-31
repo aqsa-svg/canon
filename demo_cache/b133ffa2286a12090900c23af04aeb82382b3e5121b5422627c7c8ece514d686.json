@@ -1,0 +1,17 @@
+{
+  "raw_json": "{\"reading\":\"Show reported revenue broken down by quarter for the years 2017 and 2018.\",\"candidates\":[{\"metric\":\"reported_revenue\",\"score\":1.0,\"why\":\"The question explicitly asks for reported revenue, which maps directly to the reported_revenue metric.\"},{\"metric\":\"gross_revenue\",\"score\":0.2,\"why\":\"Related revenue metric but not the same definition; the question specifies reported revenue.\"},{\"metric\":\"net_revenue\",\"score\":0.2,\"why\":\"Related revenue metric but not the same; the question specifies reported revenue.\"}],\"intent\":{\"metric\":\"reported_revenue\",\"dimensions\":[],\"time_grain\":\"quarter\",\"time_range\":{\"start\":\"2017-01-01\",\"end\":\"2019-01-01\"},\"filters\":[],\"comparison\":null,\"sort\":null,\"limit\":null},\"missing_information\":[],\"proposed_clarification\":null}",
+  "provider": "groq",
+  "model_id": "openai/gpt-oss-120b",
+  "config_hash": "72af3a5ba084b045",
+  "usage": {
+    "provider": "groq",
+    "model_id": "openai/gpt-oss-120b",
+    "config_hash": "72af3a5ba084b045",
+    "input_tokens": 7041,
+    "output_tokens": 425,
+    "cached": false,
+    "latency_seconds": 1.938,
+    "throttled_seconds": 54.856,
+    "attempts": 1
+  }
+}

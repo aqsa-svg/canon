@@ -1,0 +1,17 @@
+{
+  "raw_json": "{\"reading\":\"Total revenue for the year 2018.\",\"candidates\":[{\"metric\":\"gross_revenue\",\"score\":0.33,\"why\":\"Revenue could refer to total billed amount including freight and canceled orders.\"},{\"metric\":\"net_revenue\",\"score\":0.33,\"why\":\"Revenue could refer to merchandise revenue excluding freight and excluding canceled/unavailable orders.\"},{\"metric\":\"reported_revenue\",\"score\":0.33,\"why\":\"Revenue could refer to the finance pack's reported revenue, which changes definition in 2018.\"}],\"intent\":null,\"missing_information\":[\"which revenue definition (gross, net, or reported) is intended\"],\"proposed_clarification\":\"Please specify whether you want gross revenue, net revenue, or the finance\u2011pack reported revenue.\"}",
+  "provider": "groq",
+  "model_id": "openai/gpt-oss-120b",
+  "config_hash": "72af3a5ba084b045",
+  "usage": {
+    "provider": "groq",
+    "model_id": "openai/gpt-oss-120b",
+    "config_hash": "72af3a5ba084b045",
+    "input_tokens": 7037,
+    "output_tokens": 411,
+    "cached": false,
+    "latency_seconds": 1.796,
+    "throttled_seconds": 40.225,
+    "attempts": 1
+  }
+}

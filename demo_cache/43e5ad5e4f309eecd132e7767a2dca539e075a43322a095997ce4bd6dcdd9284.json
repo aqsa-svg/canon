@@ -1,0 +1,17 @@
+{
+  "raw_json": "{\"reading\":\"Net revenue for October 2018.\",\"candidates\":[{\"metric\":\"net_revenue\",\"score\":1.0,\"why\":\"The question explicitly asks for net revenue.\"},{\"metric\":\"gross_revenue\",\"score\":0.0,\"why\":\"Gross revenue is a different metric; the question does not ask for it.\"},{\"metric\":\"reported_revenue\",\"score\":0.0,\"why\":\"Reported revenue is a distinct definition; not requested.\"}],\"intent\":{\"metric\":\"net_revenue\",\"dimensions\":[],\"time_grain\":null,\"time_range\":{\"start\":\"2018-10-01\",\"end\":\"2018-11-01\"},\"filters\":[],\"comparison\":null,\"sort\":null,\"limit\":null},\"missing_information\":[],\"proposed_clarification\":null}",
+  "provider": "groq",
+  "model_id": "openai/gpt-oss-120b",
+  "config_hash": "72af3a5ba084b045",
+  "usage": {
+    "provider": "groq",
+    "model_id": "openai/gpt-oss-120b",
+    "config_hash": "72af3a5ba084b045",
+    "input_tokens": 7036,
+    "output_tokens": 448,
+    "cached": false,
+    "latency_seconds": 30.032,
+    "throttled_seconds": 26.156,
+    "attempts": 1
+  }
+}

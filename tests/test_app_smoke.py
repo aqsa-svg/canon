@@ -87,3 +87,183 @@ def test_clicking_an_example_only_changes_the_question() -> None:
     assert not app.exception, [error.value for error in app.exception]
     assert app.info, "still waiting to be asked"
     assert "revenue" in app.text_input[0].value.lower()
+
+
+class TestPublicExposure:
+    """The page is deployed publicly against a shared free-tier quota.
+
+    Every guard below is exercised by forcing its path, not by reading the code and
+    concluding it would work. The partial-run refusal message in the variance report was
+    wrong until it was actually triggered, which is the precedent for this class.
+    """
+
+    def test_an_example_replays_from_cache_and_spends_nothing(self) -> None:
+        """The headline safety property: the four examples are free.
+
+        This drives the real cache-only client, so it fails if the recorded responses are
+        missing or the cache key stops matching the benchmark's.
+        """
+        app = _run()
+        app.button[0].click().run()  # first example
+        ask = next(button for button in app.button if button.label == "Ask")
+        ask.click().run()
+
+        assert not app.exception, [error.value for error in app.exception]
+        captions = " ".join(caption.value for caption in app.caption)
+        assert "Replay of a recorded run" in captions, captions[:400]
+        assert "No model call was made" in captions
+
+    def test_a_replay_is_never_dressed_up_as_a_live_call(self) -> None:
+        """A cached answer and a live one are identical downstream.
+
+        So the difference has to be stated. An interface that cannot tell the viewer
+        which one they are looking at is the same defect as a latency mean that averages
+        cache hits.
+        """
+        app = _run()
+        app.button[0].click().run()
+        next(button for button in app.button if button.label == "Ask").click().run()
+
+        captions = " ".join(caption.value for caption in app.caption)
+        assert "Replay" in captions
+        assert "Live call" not in captions
+
+    def test_the_session_cap_refuses_a_fourth_live_question(self) -> None:
+        """A stranger cannot spend the day's quota three tokens at a time."""
+        app = AppTest.from_file(APP_PATH, default_timeout=TIMEOUT_SECONDS)
+        app.session_state["live_calls"] = 3
+        app.run()
+        app.text_input[0].set_value("how many sellers are there in Bahia").run()
+        next(button for button in app.button if button.label == "Ask").click().run()
+
+        assert not app.exception, [error.value for error in app.exception]
+        warnings = " ".join(warning.value for warning in app.warning)
+        assert "live questions" in warnings, warnings[:400]
+        # It must point somewhere useful rather than just refusing.
+        body = warnings + " ".join(block.value for block in app.markdown)
+        assert "cost nothing" in body
+
+    def test_a_question_matching_an_example_is_replayed_not_charged(self) -> None:
+        """Typing an example's text verbatim takes the free path too.
+
+        Routing on the button rather than on the question would charge a visitor for a
+        question that is already on disk.
+        """
+        app = AppTest.from_file(APP_PATH, default_timeout=TIMEOUT_SECONDS)
+        app.session_state["live_calls"] = 99  # live calls are exhausted
+        app.run()
+        app.text_input[0].set_value("What was net revenue in 2018?").run()
+        next(button for button in app.button if button.label == "Ask").click().run()
+
+        assert not app.exception, [error.value for error in app.exception]
+        captions = " ".join(caption.value for caption in app.caption)
+        assert "Replay of a recorded run" in captions, captions[:300]
+
+    def test_the_daily_ceiling_refuses_and_points_at_the_examples(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Forced rather than reasoned about: the demo's own budget is spent.
+
+        Metered under a separate ledger key from the benchmark. An earlier version read
+        the provider's total, so a sweep that spent most of the day's tokens silently
+        disabled the public demo -- found by this test expecting the session cap and
+        getting the daily one.
+        """
+        import canon.agent.providers as providers
+
+        class _SpentLedger:
+            def usage(self, provider: str, day: str | None = None) -> object:
+                return type("U", (), {"tokens": 10**9, "requests": 0})()
+
+            def record(self, provider: str, *, tokens: int, requests: int = 1) -> None:
+                return None
+
+        monkeypatch.setattr(providers, "QuotaLedger", _SpentLedger)
+
+        app = AppTest.from_file(APP_PATH, default_timeout=TIMEOUT_SECONDS)
+        app.run()
+        app.text_input[0].set_value("how many sellers are there in Bahia").run()
+        next(button for button in app.button if button.label == "Ask").click().run()
+
+        assert not app.exception, [error.value for error in app.exception]
+        errors = " ".join(error.value for error in app.error)
+        assert "daily budget" in errors.lower(), errors[:400]
+        assert "00:00 UTC" in errors
+        body = " ".join(block.value for block in app.markdown)
+        assert "cost nothing" in body, "a refusal must point back at the free examples"
+
+    def test_a_provider_failure_is_a_message_not_a_traceback(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The error path a visitor is most likely to hit, driven for real."""
+        from canon.agent.llm import LlmError
+        from canon.agent.pipeline import CanonPipeline
+
+        def _boom(self: CanonPipeline, question: str, context: object = None) -> None:
+            raise LlmError("429 rate_limit_exceeded: slow down")
+
+        monkeypatch.setattr(CanonPipeline, "answer", _boom)
+
+        app = AppTest.from_file(APP_PATH, default_timeout=TIMEOUT_SECONDS)
+        app.run()
+        app.text_input[0].set_value("how many sellers are there in Bahia").run()
+        next(button for button in app.button if button.label == "Ask").click().run()
+
+        assert not app.exception, "a provider error must not surface as a stack trace"
+        errors = " ".join(error.value for error in app.error)
+        assert "could not answer" in errors.lower(), errors[:400]
+        captions = " ".join(caption.value for caption in app.caption)
+        assert "LlmError" in captions, "the real cause is still shown, just not as a crash"
+
+    def test_every_example_has_a_committed_recording(self) -> None:
+        """All four, not just the one the click test happens to drive.
+
+        ``demo_cache/`` is keyed by a hash over the system prompt, the schema and the
+        question. Any change to the prompt or to ``AgentDecision`` silently invalidates
+        every key, and the first symptom would be a deployed demo that charges visitors
+        for questions it advertises as free. This fails loudly instead.
+        """
+        import demo_config as demo
+        from canon.agent.llm import CacheMiss, CallContext, LlmClient
+        from canon.agent.pipeline import CanonPipeline
+
+        pipeline = CanonPipeline(
+            db_path=demo.DB_PATH,
+            client=LlmClient(cache_only=True, cache_dir=demo.DEMO_CACHE),
+            decision_log=None,
+        )
+        try:
+            for example in demo.EXAMPLES:
+                try:
+                    result = pipeline.answer(
+                        example.question,
+                        context=CallContext(
+                            system="canon", question_id=example.question_id, run_index=0
+                        ),
+                    )
+                except CacheMiss:  # pragma: no cover - the failure this test exists for
+                    pytest.fail(
+                        f"no recording for {example.question_id} in demo_cache/. A prompt or "
+                        "schema change invalidated the key; re-record before deploying."
+                    )
+                assert result.usage.total_tokens == 0, f"{example.question_id} spent tokens"
+                assert result.answer is not None, f"{example.question_id} gave no answer"
+        finally:
+            pipeline.close()
+
+    def test_the_demo_cache_is_tracked_by_git(self) -> None:
+        """A gitignored recording is no recording at all on Streamlit Cloud."""
+        import subprocess
+
+        import demo_config as demo
+
+        tracked = subprocess.run(
+            ["git", "ls-files", str(demo.DEMO_CACHE.name)],
+            capture_output=True,
+            text=True,
+            cwd=demo.REPO_ROOT,
+            check=False,
+        ).stdout.split()
+        assert len(tracked) == len(demo.EXAMPLES), (
+            f"expected {len(demo.EXAMPLES)} tracked recordings, found {len(tracked)}"
+        )
