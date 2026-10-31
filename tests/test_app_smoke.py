@@ -267,3 +267,41 @@ class TestPublicExposure:
         assert len(tracked) == len(demo.EXAMPLES), (
             f"expected {len(demo.EXAMPLES)} tracked recordings, found {len(tracked)}"
         )
+
+    def test_without_a_key_the_examples_still_work(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A deployment with no key configured must still demo.
+
+        This is what a visitor saw on the first Streamlit Cloud deploy: the sidebar
+        reported no API key. The examples replay from ``demo_cache/`` and need no
+        provider at all, so a missing key is a warning about one feature rather than a
+        failure of the page.
+        """
+        for name in ("GROQ_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY", "ANTHROPIC_API_KEY"):
+            monkeypatch.delenv(name, raising=False)
+
+        app = AppTest.from_file(APP_PATH, default_timeout=TIMEOUT_SECONDS)
+        app.run()
+        assert not app.exception, [error.value for error in app.exception]
+
+        warnings = " ".join(warning.value for warning in app.sidebar.warning)
+        assert "No API key" in warnings, warnings[:300]
+        assert "examples still work" in warnings, "it must say what still works"
+        # Not fatal: the page carries on to offer the examples.
+        assert len([b for b in app.button if b.label != "Ask"]) == 4
+
+        app.button[0].click().run()
+        next(button for button in app.button if button.label == "Ask").click().run()
+        assert not app.exception, [error.value for error in app.exception]
+        captions = " ".join(caption.value for caption in app.caption)
+        assert "Replay of a recorded run" in captions, captions[:300]
+
+    def test_the_missing_key_hint_covers_both_deployments(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The original message told a Cloud user to create a file they cannot create."""
+        monkeypatch.delenv("GROQ_API_KEY", raising=False)
+        app = AppTest.from_file(APP_PATH, default_timeout=TIMEOUT_SECONDS)
+        app.run()
+        hint = " ".join(caption.value for caption in app.sidebar.caption)
+        assert "Secrets" in hint, "must name the Streamlit Cloud path"
+        assert ".env" in hint, "must still name the local path"

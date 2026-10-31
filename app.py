@@ -11,8 +11,11 @@ Run:  uv run streamlit run app.py
 
 from __future__ import annotations
 
+import os
+
 import pandas as pd
 import streamlit as st
+from streamlit.errors import StreamlitSecretNotFoundError
 
 from canon.agent.llm import CacheMiss, CallContext, LlmClient, LlmError
 from canon.agent.pipeline import CanonPipeline, PipelineResult
@@ -36,6 +39,33 @@ from demo_config import (
 )
 
 st.set_page_config(page_title="Canon", layout="wide", page_icon="📐")
+
+
+def _bridge_secrets_to_environment() -> None:
+    """Copy provider keys from Streamlit's secrets store into the environment.
+
+    The provider layer reads ``os.environ`` because it has to work from the harness and
+    the scripts, where Streamlit does not exist. On Streamlit Cloud there is no ``.env``
+    to load -- keys are entered in *Settings → Secrets* -- so without this bridge a
+    correctly-configured deployment still reports no API key.
+
+    Streamlit does export top-level secrets as environment variables itself, but relying
+    on that leaves the deployment working by a side effect rather than by intent, and the
+    failure mode is a confusing message rather than a crash. Existing environment values
+    win, so a local ``.env`` is never overridden by a stale secret.
+    """
+    for name in ("GROQ_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY", "ANTHROPIC_API_KEY"):
+        if os.environ.get(name):
+            continue
+        try:
+            value = st.secrets[name]
+        except (KeyError, FileNotFoundError, StreamlitSecretNotFoundError):
+            continue
+        if isinstance(value, str) and value.strip():
+            os.environ[name] = value.strip()
+
+
+_bridge_secrets_to_environment()
 
 
 @st.cache_resource
@@ -129,9 +159,18 @@ with st.sidebar:
 
     client = LlmClient(provider=provider_name)
     if not client.has_credentials():
-        st.error(
-            f"No API key for `{provider_name}`. Copy `.env.example` to `.env` and add one. "
-            "Never put a real key in `.env.example` — it is tracked by git."
+        # Deliberately a warning rather than an error, and deliberately not a stop: the
+        # four examples replay from demo_cache/ and need no key at all. Calling this
+        # fatal would hide the part of the demo that works.
+        st.warning(
+            f"**No API key for `{provider_name}`** — the four examples still work, "
+            "because they replay recorded runs. Only a question you type needs a key."
+        )
+        st.caption(
+            "**Deployed on Streamlit Cloud?** Add it under *Manage app → Settings → "
+            f'Secrets* as `{provider_name.upper()}_API_KEY = "..."`. '
+            "**Running locally?** Copy `.env.example` to `.env` and put it there — never "
+            "in `.env.example`, which is tracked by git."
         )
 
     requests_left, tokens_left = client.remaining_today()
