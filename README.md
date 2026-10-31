@@ -258,9 +258,23 @@ Three deliberate traps make the benchmark measure something real:
 
 ## Demo
 
-![demo](docs/demo.gif)
+`make demo` opens a Streamlit app with four one-click examples, chosen because each one
+shows a different thing going right:
 
-*(GIF placeholder — record with `make demo` running.)*
+| Example | What to watch |
+|---|---|
+| **Clean answer** — *"What was net revenue in 2018?"* | The card's default status filter is applied without being asked for, and surfaces as a caveat rather than silently. |
+| **Ambiguous — it asks** — *"How much revenue did we make in 2018?"* | Three revenue definitions exist and none is the default, so Canon returns a clarifying question. This is the moment the project is about. |
+| **Definition changes mid-series** — *"Reported revenue by quarter across 2017 and 2018"* | `reported_revenue` changes its freight treatment on 2018-01-01 and prior periods were never restated. The numbers are right; growth through the boundary is not, and the caveat says so. |
+| **Verification gate trips** — *"Net revenue in October 2018?"* | Legal intent, correct SQL, zero rows — every order that month was canceled. The gate returns a flag, not a figure. |
+
+Every answer shows the SQL that produced it, the metric definition used, and the caveats
+attached to that definition.
+
+*(No screen recording is committed. A GIF would be a claim about behaviour that nobody
+could verify without running it, and the four examples above are reproducible in about a
+minute — the first run of each costs free-tier tokens, and after that it is served from
+cache.)*
 
 ---
 
