@@ -26,3 +26,7 @@ benchmark/runs/
 benchmark/runs/
 data/llm_cache/
 data/quota_ledger.json
+
+# intermediate frames from scripts/record_demo.py; the mp4/gif are committed, these are not
+docs/_frames/
+docs/_check/

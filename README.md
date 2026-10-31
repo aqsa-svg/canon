@@ -311,10 +311,25 @@ shows a different thing going right:
 Every answer shows the SQL that produced it, the metric definition used, and the caveats
 attached to that definition.
 
-*(No screen recording is committed. A GIF would be a claim about behaviour that nobody
-could verify without running it, and the four examples above are reproducible in about a
-minute — the first run of each costs free-tier tokens, and after that it is served from
-cache.)*
+![Canon answering, refusing, and showing its working](docs/demo.gif)
+
+*Three of the four examples, in order: a clean answer with the canonical definition and
+its caveats; the refusal, where three revenue definitions exist and none is the default;
+and the definition that changes mid-series.*
+
+An earlier version of this README argued that no recording should be committed, on the
+grounds that a GIF is a claim about behaviour nobody can verify. That objection is
+answered rather than ignored: the recording is produced by
+[`scripts/record_demo.py`](scripts/record_demo.py), which drives the real application in
+a real browser and screenshots whatever actually appears. Re-record it yourself with
+
+```bash
+python -m streamlit run app.py --server.headless true --server.port 8599
+python scripts/record_demo.py --url http://localhost:8599   # needs playwright
+```
+
+It costs nothing to run, because every example replays from `demo_cache/` — the same
+property that makes the public demo safe to leave open.
 
 ---
 
