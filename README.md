@@ -140,6 +140,32 @@ cp .env.example .env          # add GROQ_API_KEY. Never put a real key in .env.e
 make data                     # download Olist, build data/canon.duckdb (~126MB, idempotent)
 ```
 
+<details>
+<summary><strong>Which of these paths has actually been run, and on what</strong></summary>
+
+Worth stating, because a README that documents an unverified path is the same failure as
+a benchmark that reports an unmeasured number.
+
+- **`uv sync` — not verified recently.** `uv` was used throughout early development and
+  `uv.lock` is committed, but Windows Application Control began blocking `uv.exe` on the
+  development machine partway through, so the most recent work ran the virtualenv's
+  interpreter directly (`.venv/Scripts/python.exe -m pytest`, `-m ruff`). `uv sync` is
+  still the right instruction for a stranger — it is what the lockfile is for — but it has
+  not been exercised end to end lately and is documented rather than attested.
+- **`requirements.txt` — verified against a clean clone.** Pinned exactly, and every
+  third-party import in the shipped code was checked against it by walking the ASTs of a
+  fresh checkout. It is what Streamlit Cloud builds from.
+- **`make data` — verified against a clean clone.** Run from a fresh `git clone` with no
+  `data/` directory, downloading from the public mirrors over plain HTTPS. No credentials
+  are involved.
+- **The test suite — verified continuously**, via the interpreter directly rather than
+  through `make test`, which shells out to `uv`.
+
+If `uv` is unavailable to you too, `pip install -r requirements.txt` followed by
+`python -m pytest` is the path that has been exercised.
+
+</details>
+
 **3. Always dry-run first.** It contacts no provider, so it costs nothing — calling a
 `count_tokens` endpoint to estimate quota would spend the budget the dry-run exists to
 protect.
@@ -255,6 +281,20 @@ Three deliberate traps make the benchmark measure something real:
   query is *safe*, and `valid_dimensions` encodes the judgment the graph cannot see.
 
 ---
+
+## Live demo
+
+**▶ [TODO: paste the Streamlit Community Cloud URL here after deploying]**
+
+Runs on a free-tier quota and is rate-limited, so it may decline a question when the
+day's budget is spent — that constraint is the project's, not a fault, and the page says
+so when it happens.
+
+**The four examples are replays of recorded runs** from `sweep-groq-r1`, served from
+`demo_cache/` at zero token cost, and labelled as replays in the interface. The intent,
+the compiled SQL and the verification all re-execute live against the warehouse; only the
+model's reply is stored. **A question you type yourself runs live** against the provider,
+capped at three per session.
 
 ## Demo
 
